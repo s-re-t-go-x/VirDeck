@@ -1,0 +1,15 @@
+# Runtime data and downloaded dependencies
+/VirDeckData/
+/data/
+
+# Build packages, backups and review screenshots
+/dist/
+/.artifacts/
+/.superpowers/
+*.exe
+*.test
+*.out
+
+# Local logs and temporary files
+*.log
+*.tmp

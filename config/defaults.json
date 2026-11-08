@@ -1,0 +1,70 @@
+{
+  "create": {
+    "name": "account",
+    "count": 1,
+    "memoryMB": 2048,
+    "cores": 2,
+    "resolution": "720p",
+    "headless": true,
+    "image": "system-images;android-30;google_apis_playstore;x86_64"
+  },
+  "runtime": {
+    "minPort": 5554,
+    "maxPort": 5584,
+    "maxConcurrent": 8,
+    "adbServerPort": 5137,
+    "stopGraceSeconds": 12,
+    "bootTimeoutSeconds": 180
+  },
+  "sources": {
+    "repositoryXML": "https://dl.google.com/android/repository/repository2-3.xml",
+    "playStoreXML": "https://dl.google.com/android/repository/sys-img/google_apis_playstore/sys-img2-3.xml",
+    "googleAPIsXML": "https://dl.google.com/android/repository/sys-img/google_apis/sys-img2-3.xml",
+    "defaultXML": "https://dl.google.com/android/repository/sys-img/android/sys-img2-3.xml",
+    "platformTools": "https://dl.google.com/android/repository/platform-tools-latest-windows.zip",
+    "scrcpy": "https://github.com/Genymobile/scrcpy/releases/download/v3.1/scrcpy-win64-v3.1.zip"
+  },
+  "images": [
+    {
+      "id": "system-images;android-30;google_apis_playstore;x86_64",
+      "name": "Android 11 (API 30) - Google Play 商店",
+      "apiLevel": "30",
+      "tagId": "google_apis_playstore",
+      "abi": "x86_64",
+      "url": "",
+      "favorite": true,
+      "note": "Gmail / Facebook / WhatsApp / Instagram / Chrome 首选"
+    },
+    {
+      "id": "system-images;android-34;google_apis_playstore;x86_64",
+      "name": "Android 14 (API 34) - Google Play 商店",
+      "apiLevel": "34",
+      "tagId": "google_apis_playstore",
+      "abi": "x86_64",
+      "url": "https://dl.google.com/android/repository/sys-img/google_apis_playstore/x86_64-34_r14.zip",
+      "favorite": false,
+      "note": ""
+    },
+    {
+      "id": "system-images;android-33;google_apis_playstore;x86_64",
+      "name": "Android 13 (API 33) - Google Play 商店",
+      "apiLevel": "33",
+      "tagId": "google_apis_playstore",
+      "abi": "x86_64",
+      "url": "https://dl.google.com/android/repository/sys-img/google_apis_playstore/x86_64-33_r09.zip",
+      "favorite": false,
+      "note": ""
+    },
+    {
+      "id": "system-images;android-34;default;x86_64",
+      "name": "Android 14 (API 34) - AOSP 纯净版",
+      "apiLevel": "34",
+      "tagId": "default",
+      "abi": "x86_64",
+      "url": "https://dl.google.com/android/repository/sys-img/android/x86_64-34_r08.zip",
+      "favorite": false,
+      "note": ""
+    }
+  ],
+  "cloneCount": 1
+}

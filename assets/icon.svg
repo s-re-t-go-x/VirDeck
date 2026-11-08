@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <title>VirDeck</title>
+  <rect width="256" height="256" rx="60" fill="#5963DF"/>
+  <rect x="88" y="60" width="80" height="144" rx="18" fill="#8891EB" transform="rotate(-20 128 208)"/>
+  <rect x="88" y="60" width="80" height="144" rx="18" fill="#B1B8F5" transform="rotate(20 128 208)"/>
+  <rect x="88" y="60" width="80" height="144" rx="18" fill="#F5F6FF"/>
+  <rect x="112" y="76" width="32" height="8" rx="4" fill="#5963DF"/>
+</svg>
