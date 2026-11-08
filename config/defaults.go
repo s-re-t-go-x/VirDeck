@@ -47,12 +47,23 @@ type ImagePreset struct {
 	Favorite bool   `json:"favorite"`
 	Note     string `json:"note"`
 }
+type ScreenLayoutDefaults struct {
+	AutoFill             bool   `json:"autoFill"`
+	Size                 string `json:"size"`
+	Gap                  int    `json:"gap"`
+	SmallHeight          int    `json:"smallHeight"`
+	MediumHeight         int    `json:"mediumHeight"`
+	LargeHeight          int    `json:"largeHeight"`
+	WindowTimeoutSeconds int    `json:"windowTimeoutSeconds"`
+}
+
 type Defaults struct {
-	CloneCount int             `json:"cloneCount"`
-	Create     CreateDefaults  `json:"create"`
-	Runtime    RuntimeDefaults `json:"runtime"`
-	Sources    Sources         `json:"sources"`
-	Images     []ImagePreset   `json:"images"`
+	ScreenLayout ScreenLayoutDefaults `json:"screenLayout"`
+	CloneCount   int                  `json:"cloneCount"`
+	Create       CreateDefaults       `json:"create"`
+	Runtime      RuntimeDefaults      `json:"runtime"`
+	Sources      Sources              `json:"sources"`
+	Images       []ImagePreset        `json:"images"`
 }
 
 func decode(raw []byte, d *Defaults) error {
@@ -70,6 +81,13 @@ func decode(raw []byte, d *Defaults) error {
 	r := d.Runtime
 	if r.MinPort < 1024 || r.MaxPort > 65534 || r.MinPort > r.MaxPort || r.MinPort%2 != 0 || r.MaxPort%2 != 0 || r.MaxConcurrent < 1 || r.ADBServerPort < 1 || r.ADBServerPort > 65535 || r.StopGraceSeconds < 1 || r.BootTimeoutSeconds < 1 {
 		return errors.New("运行环境默认配置无效")
+	}
+	layout := d.ScreenLayout
+	if layout.Size != "auto" && layout.Size != "small" && layout.Size != "medium" && layout.Size != "large" {
+		return errors.New("默认投屏尺寸无效")
+	}
+	if layout.Gap < 0 || layout.Gap > 100 || layout.SmallHeight < 1 || layout.MediumHeight < layout.SmallHeight || layout.LargeHeight < layout.MediumHeight || layout.WindowTimeoutSeconds < 1 || layout.WindowTimeoutSeconds > 60 {
+		return errors.New("默认投屏排版参数无效")
 	}
 	if d.CloneCount < 1 || d.CloneCount > 32 {
 		return errors.New("默认克隆数量无效")

@@ -66,5 +66,14 @@
       "note": ""
     }
   ],
-  "cloneCount": 1
+  "cloneCount": 1,
+  "screenLayout": {
+    "size": "auto",
+    "gap": 8,
+    "smallHeight": 360,
+    "mediumHeight": 540,
+    "largeHeight": 720,
+    "windowTimeoutSeconds": 8,
+    "autoFill": false
+  }
 }

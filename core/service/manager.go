@@ -21,6 +21,7 @@ import (
 	"virdeck/core/downloader"
 	"virdeck/core/emu"
 	"virdeck/core/instance"
+	"virdeck/core/screenlayout"
 )
 
 var (
@@ -53,7 +54,12 @@ type emuBackend interface {
 	CloneAVD(srcName, dstName string) error
 	DeleteAVD(ctx context.Context, name string) error
 	StartProcess(opts emu.LaunchOptions) (*emu.Process, error)
-	StartScrcpy(port int, title string) error
+	StartProjection(ctx context.Context, id string, port int, title string) (bool, error)
+	ScrcpyDisplays() ([]screenlayout.Display, error)
+	ScrcpyWindows() ([]emu.ProjectionWindow, error)
+	ArrangeScrcpy(ctx context.Context, ids []string, displayID string, height, gap int) (int, error)
+	ArrangeProjection(context.Context, []string, emu.ScreenLayoutOptions) (int, error)
+	RestoreProjection(context.Context, []string, []emu.SavedProjection) (int, error)
 }
 
 // adbBackend abstracts adb.Client for unit testing.
@@ -94,16 +100,17 @@ type runningEntry struct {
 
 // Manager implements the Service interface.
 type Manager struct {
-	namesMu      sync.Mutex
-	maintenance  sync.RWMutex // excludes cleanup from installs and instance mutations
-	cfg          Config
-	settingsPath string
-	settings     Settings
-	registry     *instance.Registry
-	cat          *catalog.Store
-	dl           *downloader.Client
-	emu          emuBackend
-	adb          adbBackend
+	screenLayoutMu sync.Mutex
+	namesMu        sync.Mutex
+	maintenance    sync.RWMutex // excludes cleanup from installs and instance mutations
+	cfg            Config
+	settingsPath   string
+	settings       Settings
+	registry       *instance.Registry
+	cat            *catalog.Store
+	dl             *downloader.Client
+	emu            emuBackend
+	adb            adbBackend
 
 	mu        sync.Mutex
 	running   map[string]*runningEntry // instanceID -> runningEntry
@@ -776,11 +783,15 @@ func (m *Manager) OpenScreen(ctx context.Context, id string) error {
 		return fmt.Errorf("实例 %s 尚未运行，无法打开投屏", inst.Name)
 	}
 	title := fmt.Sprintf("%s (emulator-%d)", inst.Name, inst.Port)
-	if err := m.emu.StartScrcpy(inst.Port, title); err != nil {
+	created, err := m.emu.StartProjection(ctx, inst.ID, inst.Port, title)
+	if err != nil {
 		m.emitLog(id, fmt.Sprintf("打开 %s 投屏失败: %v", inst.Name, err))
 		return err
 	}
 	m.emitLog(id, fmt.Sprintf("已拉起 %s 的 scrcpy 投屏窗口", inst.Name))
+	if created {
+		return m.fillNewScreen(ctx, id)
+	}
 	return nil
 }
 

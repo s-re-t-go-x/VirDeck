@@ -60,8 +60,9 @@ func Run(svc service.Service) error {
 }
 
 type viewModel struct {
-	svc service.Service
-	win *mygo.Window
+	screens screenLayoutState
+	svc     service.Service
+	win     *mygo.Window
 	// post runs fn on the UI thread (directly when there is no window, as in tests).
 	post func(fn func())
 
@@ -546,6 +547,7 @@ func (vm *viewModel) view(c *ui.Context) {
 			vm.buildTaskDock(c)
 		})
 	})
+	vm.buildScreenLayoutModal(c)
 	vm.buildCreateModal(c)
 	vm.buildEditModal(c)
 	vm.buildCloneModal(c)
@@ -617,6 +619,13 @@ func (vm *viewModel) buildNav(c *ui.Context) {
 
 func (vm *viewModel) buildHeader(c *ui.Context, showNav bool) {
 	t := c.Theme()
+	width, _ := c.Size()
+	envLabel, settingsLabel, layoutLabel := "环境", "设置", "投屏排版"
+	if width < 760 {
+		envLabel = ""
+		settingsLabel = ""
+		layoutLabel = "排版"
+	}
 	running := 0
 	for _, inst := range vm.instances {
 		if inst.State == service.Running || inst.State == service.Starting {
@@ -630,15 +639,18 @@ func (vm *viewModel) buildHeader(c *ui.Context, showNav bool) {
 		})
 		ui.Spacer(c)
 		if !showNav {
-			if quietControl(c, "hdr_env", "环境", "layers").Clicked() {
+			if quietControl(c, "hdr_env", envLabel, "layers").Label("环境").Tooltip("环境").Clicked() {
 				vm.showEnv, vm.envTab = true, 0
 				vm.refreshEnv()
 			}
-			if quietControl(c, "hdr_settings", "设置", "settings").Clicked() {
+			if quietControl(c, "hdr_settings", settingsLabel, "settings").Label("设置").Tooltip("设置").Clicked() {
 				vm.openSettings()
 			}
 		}
-		if vm.detailHidden {
+		if quietControl(c, "hdr_screen_layout", layoutLabel, "grid").Label("投屏排版").Tooltip("排列已打开的投屏窗口").Clicked() {
+			vm.openScreenLayout()
+		}
+		if vm.detailHidden && width >= showDetailAt {
 			if quietControl(c, "hdr_detail", "实例详情", "device").Clicked() {
 				vm.detailHidden = false
 			}

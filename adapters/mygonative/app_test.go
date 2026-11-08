@@ -977,6 +977,13 @@ func TestAllDialogsKeepNarrowWindowContentInsidePanel(t *testing.T) {
 		prep        func(*viewModel)
 		render      func(*viewModel, *ui.Context)
 	}{
+		{"screen_layout", "投屏排版", func(vm *viewModel) {
+			vm.screens.show = true
+			vm.screens.snapshot = sampleScreenSnapshot()
+			vm.screens.displayID = "main"
+			vm.screens.size = "auto"
+			vm.screens.scope = screenScopeAll
+		}, (*viewModel).buildScreenLayoutModal},
 		{"create", "新建干净安卓实例", func(vm *viewModel) { vm.showCreate = true }, (*viewModel).buildCreateModal},
 		{"clone", "克隆实例（可选母版复制）", func(vm *viewModel) { vm.showClone = true; vm.cloneSrcID = "e5f60718" }, (*viewModel).buildCloneModal},
 		{"proxy", "设置 HTTP 代理（共 2 个实例）", func(vm *viewModel) { vm.openProxy(vm.instances[:2]) }, (*viewModel).buildProxyModal},

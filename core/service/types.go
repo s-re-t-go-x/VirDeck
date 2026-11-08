@@ -49,10 +49,11 @@ type CreateSpec struct {
 
 // Settings holds persisted global settings in VirDeckData/config/settings.json.
 type Settings struct {
-	MaxConcurrent   int    `json:"maxConcurrent"`
-	ADBServerPort   int    `json:"adbServerPort"`
-	DownloadProxy   string `json:"downloadProxy,omitempty"`
-	LicenseAccepted bool   `json:"licenseAccepted"`
+	ScreenLayout    ScreenLayoutPreferences `json:"screenLayout"`
+	MaxConcurrent   int                     `json:"maxConcurrent"`
+	ADBServerPort   int                     `json:"adbServerPort"`
+	DownloadProxy   string                  `json:"downloadProxy,omitempty"`
+	LicenseAccepted bool                    `json:"licenseAccepted"`
 }
 
 // EnvStatus reports discovered Android SDK/CLI tools, WHPX/AEHD hardware acceleration status,
@@ -114,5 +115,10 @@ type Service interface {
 	InstallAPK(ctx context.Context, ids []string, apkPath string) error
 	Shell(ctx context.Context, ids []string, cmd string) (map[string]string, error)
 	OpenScreen(ctx context.Context, id string) error
+	InspectScreenLayout(ctx context.Context) (ScreenLayoutSnapshot, error)
+	ArrangeScreenLayout(ctx context.Context, request ScreenLayoutRequest) (int, error)
+	SaveScreenLayout(context.Context, ScreenLayoutRequest) (int, error)
+	RestoreScreenLayout(context.Context, ScreenLayoutRequest) (int, error)
+	SetScreenAutoFill(context.Context, bool) error
 	Subscribe() (<-chan Event, func())
 }

@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"virdeck/config"
 	"virdeck/core/catalog"
 	"virdeck/core/downloader"
 	"virdeck/core/emu"
@@ -17,6 +18,7 @@ import (
 func loadSettings(path string) Settings {
 	def := Settings{
 		MaxConcurrent: DefaultMaxConcurrent,
+		ScreenLayout:  ScreenLayoutPreferences{Size: config.Values.ScreenLayout.Size, AutoFill: config.Values.ScreenLayout.AutoFill},
 		ADBServerPort: emu.DefaultADBServerPort,
 	}
 	if path == "" {
@@ -26,7 +28,7 @@ func loadSettings(path string) Settings {
 	if err != nil {
 		return def
 	}
-	var s Settings
+	s := def
 	if err := json.Unmarshal(raw, &s); err != nil {
 		return def
 	}
@@ -35,6 +37,9 @@ func loadSettings(path string) Settings {
 	}
 	if s.ADBServerPort <= 0 {
 		s.ADBServerPort = emu.DefaultADBServerPort
+	}
+	if !validScreenSize(s.ScreenLayout.Size) {
+		s.ScreenLayout.Size = def.ScreenLayout.Size
 	}
 	return s
 }
@@ -77,17 +82,24 @@ func (m *Manager) UpdateSettings(s Settings) error {
 		s.ADBServerPort = emu.DefaultADBServerPort
 	}
 	s.DownloadProxy = strings.TrimSpace(s.DownloadProxy)
+	if s.ScreenLayout.Size == "" {
+		s.ScreenLayout.Size = config.Values.ScreenLayout.Size
+	}
+	if !validScreenSize(s.ScreenLayout.Size) {
+		return errors.New("无效的投屏窗口大小")
+	}
 
 	m.mu.Lock()
+	defer m.mu.Unlock()
+	if err := saveSettings(m.settingsPath, s); err != nil {
+		return err
+	}
 	m.settings = s
 	m.cfg.MaxConcurrent = s.MaxConcurrent
 	if m.dl != nil {
 		m.dl.SetProxy(s.DownloadProxy)
 	}
-	settingsPath := m.settingsPath
-	m.mu.Unlock()
-
-	return saveSettings(settingsPath, s)
+	return nil
 }
 
 // ListCatalog returns the full 3-tier system image catalog merged with local installation status.

@@ -11,18 +11,28 @@ import (
 
 	"virdeck/core/emu"
 	"virdeck/core/instance"
+	"virdeck/core/screenlayout"
 )
 
 type fakeEmu struct {
-	mu       sync.Mutex
-	created  []string
-	cloned   []string
-	deleted  []string
-	procs    map[int]chan error
-	killErr  error
-	killOn   bool // if false, EmuKill won't close proc; ForceKillTree will
-	killed   map[int]bool
-	lastOpts map[string]emu.LaunchOptions
+	lastScreenOptions                          emu.ScreenLayoutOptions
+	restored                                   []emu.SavedProjection
+	screenStart                                func(string)
+	displays                                   []screenlayout.Display
+	screens                                    []emu.ProjectionWindow
+	arrangedIDs                                []string
+	arrangedDisplay                            string
+	arrangedHeight, arrangedGap, arrangedCount int
+	arrangeErr                                 error
+	mu                                         sync.Mutex
+	created                                    []string
+	cloned                                     []string
+	deleted                                    []string
+	procs                                      map[int]chan error
+	killErr                                    error
+	killOn                                     bool // if false, EmuKill won't close proc; ForceKillTree will
+	killed                                     map[int]bool
+	lastOpts                                   map[string]emu.LaunchOptions
 }
 
 func newFakeEmu() *fakeEmu {
@@ -90,7 +100,10 @@ func (f *fakeEmu) StartProcess(opts emu.LaunchOptions) (*emu.Process, error) {
 	}), nil
 }
 
-func (f *fakeEmu) StartScrcpy(port int, title string) error {
+func (f *fakeEmu) StartScrcpy(ctx context.Context, id string, port int, title string) error {
+	if f.screenStart != nil {
+		f.screenStart(id)
+	}
 	return nil
 }
 
@@ -443,3 +456,34 @@ func TestBootTimeoutKillFailureKeepsResourcesUntilStopped(t *testing.T) {
 }
 
 func (a *fakeADB) HasEmulators(ctx context.Context) (bool, error) { return false, nil }
+
+func (f *fakeEmu) ScrcpyDisplays() ([]screenlayout.Display, error) { return f.displays, nil }
+func (f *fakeEmu) ScrcpyWindows() ([]emu.ProjectionWindow, error)  { return f.screens, nil }
+func (f *fakeEmu) ArrangeScrcpy(ctx context.Context, ids []string, displayID string, height, gap int) (int, error) {
+	f.arrangedIDs = append([]string{}, ids...)
+	f.arrangedDisplay = displayID
+	f.arrangedHeight = height
+	f.arrangedGap = gap
+	return f.arrangedCount, f.arrangeErr
+}
+
+func (f *fakeEmu) ArrangeProjection(ctx context.Context, ids []string, opt emu.ScreenLayoutOptions) (int, error) {
+	f.lastScreenOptions = opt
+	return f.ArrangeScrcpy(ctx, ids, opt.DisplayID, opt.Height, opt.Gap)
+}
+func (f *fakeEmu) RestoreProjection(ctx context.Context, ids []string, records []emu.SavedProjection) (int, error) {
+	f.arrangedIDs = append([]string(nil), ids...)
+	f.restored = append([]emu.SavedProjection(nil), records...)
+	return f.arrangedCount, f.arrangeErr
+}
+
+func (f *fakeEmu) StartProjection(ctx context.Context, id string, port int, title string) (bool, error) {
+	created := true
+	for _, p := range f.screens {
+		if p.InstanceID == id {
+			created = false
+			break
+		}
+	}
+	return created, f.StartScrcpy(ctx, id, port, title)
+}

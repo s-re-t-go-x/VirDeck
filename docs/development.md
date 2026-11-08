@@ -7,7 +7,8 @@
 - `adapters/cli`：命令行适配。
 - `core/service`：实例生命周期、配置编辑、镜像安装和缓存清理。
 - `core/instance`：实例注册表与原子持久化。
-- `core/emu`：AVD 生成、启动、克隆及路径修复。
+- `core/emu`：AVD 生成、启动、克隆、路径修复及独立投屏进程管理。
+- `core/screenlayout`：Windows 窗口发现、显示器工作区与 DPI、窗口平铺算法。
 - `core/adb`：ADB 操作和设备检测。
 - `core/catalog`、`core/downloader`：镜像目录、断点续传、校验和解压。
 - `config/defaults.json`：仅供编译前修改的新建参数、运行环境、下载源及默认镜像收藏，通过 `go:embed` 内嵌；运行时不读取外部文件。
@@ -21,6 +22,8 @@
 
 空间清理按下载压缩包、未完成下载及 AVD 缓存分区分类。AVD 清理会检查运行状态，ADB 检测失败时保守禁用；不清理用户磁盘或压缩实例数据。
 
+投屏保留独立 scrcpy 窗口，通过实例标识和可执行文件路径识别。重复打开仅激活；控制器明确区分创建与采用已有窗口，自动补位仅处理新创建的窗口。固定尺寸 Pack 算法按障碍物边界寻找空位，保持原比例，空间不足时跳过并保留原位；支持基准窗口不动的排列。保存 / 恢复配置位于用户 `config/screen_layout.json`，记录实例 ID、窗口矩形、显示器工作区和缩放。默认间距、尺寸、自动补位默认值及超时位于编译期 `config/defaults.json`，使用偏好写入用户 `settings.json`。Win32 放置为异步请求；短期预留按 PID/HWND 验证并在实际位置确认、手动改变或超时后释放，避免连续补位抢占同一位置。
+
 构建仅输出 `dist/VirDeck.exe`、`dist/virdeck-cli.exe`，不再自动复制文件、生成分发子目录或打 ZIP。运行数据保留在程序旁的 `VirDeckData/`，可通过环境变量覆盖。
 
 ## 验证
@@ -29,6 +32,8 @@
 go test ./...
 go vet ./...
 ```
+
+原生窗口冒烟测试可通过 `$env:VIRDECK_NATIVE_SCREENLAYOUT_TEST='1'; go test ./core/screenlayout -count=1` 启用，仅创建并操作测试进程自己的离屏窗口。
 
 真实模拟器联调、资源占用和各机器虚拟化兼容性，需与单元测试、无头渲染检查区分记录。
 

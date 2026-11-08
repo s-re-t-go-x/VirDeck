@@ -36,6 +36,7 @@ var workbenchIcons = func() map[string]*ui.SVG {
 		"layers":   "m12 3 9 5-9 5-9-5z M3 12l9 5 9-5 M3 16l9 5 9-5",
 		"settings": "M4 7h16 M4 17h16 M9 4v6 M16 14v6",
 		"help":     "M9 8a3 3 0 1 1 5 2c-2 1-2 2-2 3 M12 17h.01 M22 12a10 10 0 1 1-20 0 10 10 0 0 1 20 0",
+		"grid":     "M3 3h7v7H3z M14 3h7v7h-7z M3 14h7v7H3z M14 14h7v7h-7z",
 		"screen":   "M3 4h18v13H3z M8 21h8 M12 17v4",
 		"play":     "m8 5 11 7-11 7z",
 		"stop":     "M6 6h12v12H6z",

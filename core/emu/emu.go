@@ -12,6 +12,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"virdeck/config"
 )
@@ -113,6 +114,11 @@ func (p *Process) ForceKillTree() error {
 
 // Controller wraps Android SDK discovery, pure-Go AVD creation, emulator process launching, and scrcpy.
 type Controller struct {
+	layoutMu       sync.Mutex
+	reservations   map[string]projectionReservation
+	screenMu       sync.Mutex
+	projections    map[string]*projectionProcess
+	screenHost     projectionHost
 	dataDir        string
 	sdkRoot        string
 	avdHome        string
@@ -834,28 +840,4 @@ func (c *Controller) StartProcess(opts LaunchOptions) (*Process, error) {
 		close(p.done)
 	}()
 	return p, nil
-}
-
-// StartScrcpy launches an independent scrcpy window connected to emulator-<port> using the isolated ADB port.
-func (c *Controller) StartScrcpy(port int, title string) error {
-	_, adbBin, _, _, scrcpyBin := c.ResolvePaths()
-	if scrcpyBin == "" {
-		return fmt.Errorf("未找到 scrcpy，请在「镜像与环境」中一键下载补齐")
-	}
-	serial := fmt.Sprintf("emulator-%d", port)
-	if title == "" {
-		title = serial
-	}
-	cmd := exec.Command(scrcpyBin, "-s", serial, "--window-title", title)
-	env := c.IsolatedEnv()
-	if adbBin != "" {
-		env = append(env, "ADB="+adbBin)
-	}
-	cmd.Env = env
-	hideConsoleKeepGUI(cmd)
-	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("启动 scrcpy 失败: %w", err)
-	}
-	go func() { _ = cmd.Wait() }()
-	return nil
 }
