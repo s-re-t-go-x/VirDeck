@@ -60,9 +60,14 @@ func Run(svc service.Service) error {
 }
 
 type viewModel struct {
-	screens screenLayoutState
-	svc     service.Service
-	win     *mygo.Window
+	projection         projectionUIState
+	settingsProjection projectionForm
+	settingsTab        int
+	groups             groupUIState
+	transfer           transferUIState
+	screens            screenLayoutState
+	svc                service.Service
+	win                *mygo.Window
 	// post runs fn on the UI thread (directly when there is no window, as in tests).
 	post func(fn func())
 
@@ -223,6 +228,12 @@ func newViewModel(svc service.Service) *viewModel {
 	}
 	vm.tableState.Selection = &vm.selected
 	vm.tableState.Selected = &vm.lastRow
+	if st.LoadWarning != "" {
+		vm.appendLog(st.LoadWarning)
+		vm.tasksOpen = true
+		vm.panelTab = 1
+	}
+	vm.refreshGroups()
 	vm.logState.FollowEnd = true
 	return vm
 }
@@ -357,6 +368,9 @@ func (vm *viewModel) refreshVisible() {
 	q := strings.ToLower(strings.TrimSpace(vm.query))
 	vm.visible = vm.visible[:0]
 	for _, inst := range vm.instances {
+		if !vm.inGroup(inst.ID) {
+			continue
+		}
 		if !matchesTab(vm.filterTab, inst) {
 			continue
 		}
@@ -426,6 +440,8 @@ func (vm *viewModel) perform(a action, insts []service.Instance) {
 	}
 	ids := idsOf(insts)
 	switch a {
+	case actTransfer:
+		vm.openTransfer(insts)
 	case actStart:
 		vm.startTask("启动", a, targetsOf(insts), true, func(ctx context.Context, t target) error {
 			return vm.svc.Start(ctx, t.id)
@@ -547,6 +563,9 @@ func (vm *viewModel) view(c *ui.Context) {
 			vm.buildTaskDock(c)
 		})
 	})
+	vm.buildProjectionSettingsModal(c)
+	vm.buildGroupsModal(c)
+	vm.buildTransferModal(c)
 	vm.buildScreenLayoutModal(c)
 	vm.buildCreateModal(c)
 	vm.buildEditModal(c)
@@ -664,8 +683,13 @@ func (vm *viewModel) buildHeader(c *ui.Context, showNav bool) {
 func (vm *viewModel) buildCenter(c *ui.Context, showDetail bool) {
 	t := c.Theme()
 
-	counts := [4]int{len(vm.instances)}
+	vm.buildGroupToolbar(c)
+	counts := [4]int{}
 	for _, inst := range vm.instances {
+		if !vm.inGroup(inst.ID) {
+			continue
+		}
+		counts[0]++
 		if inst.State == service.Running || inst.State == service.Starting {
 			counts[1]++
 		}
@@ -713,11 +737,15 @@ func (vm *viewModel) buildActionBar(c *ui.Context, sel []service.Instance) {
 		vm.actionButton(c, "bar", actScreen, sel, false)
 		vm.actionButton(c, "bar", actInstallAPK, sel, false)
 		vm.actionButton(c, "bar", actShell, sel, false)
+		vm.actionButton(c, "bar", actTransfer, sel, false)
 		vm.actionButton(c, "bar", actProxy, sel, false)
 		if len(sel) == 1 {
 			vm.actionButton(c, "bar", actClone, sel, false)
 			if ui.Button(c.Key("bar_edit"), "编辑").Disabled(vm.busy[sel[0].ID] != "").Clicked() {
 				vm.openEdit(sel[0])
+			}
+			if ui.Button(c.Key("bar_projection_settings"), "投屏设置").Disabled(vm.busy[sel[0].ID] != "").Clicked() {
+				vm.openProjectionSettings(sel[0])
 			}
 		}
 		vm.actionButton(c, "bar", actDelete, sel, false)
@@ -903,7 +931,10 @@ func (vm *viewModel) buildDetailBody(c *ui.Context, inst service.Instance) {
 		if m.Item("编辑").Disabled(vm.busy[inst.ID] != "").Chosen() {
 			vm.openEdit(inst)
 		}
-		for _, a := range []action{actInstallAPK, actShell, actClone, actDelete} {
+		if m.Item("投屏设置").Disabled(vm.busy[inst.ID] != "").Chosen() {
+			vm.openProjectionSettings(inst)
+		}
+		for _, a := range []action{actInstallAPK, actShell, actTransfer, actClone, actDelete} {
 			p := planAction(a, one, vm.busy)
 			if m.Item(a.label()).Disabled(p.disabledHint() != "").Chosen() {
 				vm.invoke(a, p)
@@ -1853,36 +1884,38 @@ func (vm *viewModel) buildDirectoryRow(c *ui.Context, label, path string) {
 	})
 }
 
+func (vm *viewModel) saveGlobalSettings() {
+	st := vm.svc.GetSettings()
+	st.DownloadProxy = strings.TrimSpace(vm.settingsProxy)
+	st.MaxConcurrent = int(vm.settingsConcurrent)
+	st.Projection = vm.settingsProjection.values()
+	if err := vm.svc.UpdateSettings(st); err != nil {
+		vm.settingsSavedHint = "保存失败：" + err.Error()
+		vm.appendLog(vm.settingsSavedHint)
+	} else {
+		vm.settingsSavedHint = "✓ 已保存；投屏参数在新开或重新投屏时生效。"
+		vm.appendLog("全局设置已保存")
+	}
+}
 func (vm *viewModel) buildSettingsTab(c *ui.Context) {
 	t := c.Theme()
 	ui.Column(c).Gap(12).Children(func() {
-		ui.Text(c, "管理组件下载使用的网络，以及同时运行的实例数量。").
-			FontSize(12).TextColor(t.TextMuted)
-		ui.Form(c, func() {
-			ui.Field(c, "下载代理", func() {
-				ui.TextInput(c, &vm.settingsProxy).Placeholder("可选，如 http://127.0.0.1:7890 或 socks5://127.0.0.1:1080")
-			}).Description("用于从 dl.google.com 或 GitHub 下载 SDK 工具与系统镜像；留空则使用系统默认网络")
-			ui.Field(c, "最大运行实例数", func() {
-				ui.NumberInput(c, &vm.settingsConcurrent, 1, 16, 1)
-			}).Description("限制同时运行的实例数量，避免占用过多内存。")
-		})
-		if vm.settingsSavedHint != "" {
-			ui.Text(c, vm.settingsSavedHint).FontSize(12).TextColor(t.Success)
+		if vm.settingsTab == 0 {
+			ui.Form(c, func() {
+				ui.Field(c, "下载代理", func() { ui.TextInput(c, &vm.settingsProxy).Placeholder("可选，HTTP / SOCKS5 代理") }).Description("用于下载 SDK 与镜像；实例联网代理在实例编辑中设置。")
+				ui.Field(c, "最大运行实例数", func() { ui.NumberInput(c, &vm.settingsConcurrent, 1, 16, 1) }).Description("限制同时运行的实例数量，避免占用过多内存。")
+			})
+		} else {
+			buildProjectionFields(c, &vm.settingsProjection, false)
+			ui.Text(c, "默认所有实例跟随此设置；单实例可在「投屏设置」中覆盖。").FontSize(12).TextColor(t.TextMuted)
 		}
-		ui.Row(c).Gap(8).Children(func() {
-			if ui.PrimaryButton(c.Key("save_settings"), "保存全局设置").Clicked() {
-				st := vm.svc.GetSettings()
-				st.DownloadProxy = strings.TrimSpace(vm.settingsProxy)
-				st.MaxConcurrent = int(vm.settingsConcurrent)
-				if err := vm.svc.UpdateSettings(st); err != nil {
-					vm.settingsSavedHint = "保存失败: " + err.Error()
-				} else {
-					vm.settingsSavedHint = "✓ 已保存并立即生效"
-					vm.appendLog(fmt.Sprintf("[%s] 已更新全局设置: 并发=%d, 下载代理=%s",
-						time.Now().Format("15:04:05"), st.MaxConcurrent, proxyText(st.DownloadProxy)))
-				}
+		if vm.settingsSavedHint != "" {
+			color := t.Success
+			if strings.HasPrefix(vm.settingsSavedHint, "保存失败") {
+				color = t.Danger
 			}
-		})
+			ui.Text(c, vm.settingsSavedHint).FontSize(12).TextColor(color)
+		}
 	})
 }
 

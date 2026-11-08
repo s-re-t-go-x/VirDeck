@@ -42,8 +42,9 @@ VirDeck/
 
 ## 文档与检查
 
-- [使用指南](docs/usage.md)：环境准备、镜像、实例编辑、清理和日志。
+- [使用指南](docs/usage.md)：环境准备、投屏与声音、文件收发、分组、清理和日志。
 - [开发与技术记录](docs/development.md)：模块职责、已完成事项及合并归档的原始方案。
+- [当前 TODO](docs/TODO.md)：四项基础功能完成记录与后续工作会话计划。
 
 ```powershell
 go test ./...

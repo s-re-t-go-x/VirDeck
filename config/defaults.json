@@ -14,7 +14,12 @@
     "maxConcurrent": 8,
     "adbServerPort": 5137,
     "stopGraceSeconds": 12,
-    "bootTimeoutSeconds": 180
+    "bootTimeoutSeconds": 180,
+    "commandTimeoutSeconds": 60,
+    "installTimeoutSeconds": 300,
+    "envTimeoutSeconds": 15,
+    "downloadIdleSeconds": 60,
+    "projectionAudioCodec": "aac"
   },
   "sources": {
     "repositoryXML": "https://dl.google.com/android/repository/repository2-3.xml",
@@ -75,5 +80,11 @@
     "largeHeight": 720,
     "windowTimeoutSeconds": 8,
     "autoFill": false
+  },
+  "projection": {
+    "maxFPS": 60,
+    "maxSize": 1280,
+    "bitRateMbps": 8,
+    "audio": false
   }
 }

@@ -49,11 +49,14 @@ type CreateSpec struct {
 
 // Settings holds persisted global settings in VirDeckData/config/settings.json.
 type Settings struct {
-	ScreenLayout    ScreenLayoutPreferences `json:"screenLayout"`
-	MaxConcurrent   int                     `json:"maxConcurrent"`
-	ADBServerPort   int                     `json:"adbServerPort"`
-	DownloadProxy   string                  `json:"downloadProxy,omitempty"`
-	LicenseAccepted bool                    `json:"licenseAccepted"`
+	LoadWarning         string                        `json:"-"`
+	Projection          ProjectionSettings            `json:"projection"`
+	ProjectionOverrides map[string]ProjectionSettings `json:"projectionOverrides,omitempty"`
+	ScreenLayout        ScreenLayoutPreferences       `json:"screenLayout"`
+	MaxConcurrent       int                           `json:"maxConcurrent"`
+	ADBServerPort       int                           `json:"adbServerPort"`
+	DownloadProxy       string                        `json:"downloadProxy,omitempty"`
+	LicenseAccepted     bool                          `json:"licenseAccepted"`
 }
 
 // EnvStatus reports discovered Android SDK/CLI tools, WHPX/AEHD hardware acceleration status,
@@ -86,6 +89,11 @@ type Event struct {
 
 // Service is the UI-agnostic core interface. All UI and CLI adapters interact exclusively through it.
 type Service interface {
+	ListGroups(context.Context) (GroupSnapshot, error)
+	CreateGroup(context.Context, string) (Group, error)
+	RenameGroup(context.Context, string, string) error
+	DeleteGroup(context.Context, string) error
+	AssignGroup(context.Context, []string, string) error
 	EditInstance(ctx context.Context, id string, spec InstanceSettings) error
 	RenameInstance(ctx context.Context, id, name string) error
 	ScanCleanup(ctx context.Context) (CleanupReport, error)
@@ -114,7 +122,13 @@ type Service interface {
 	SetHeadless(ctx context.Context, id string, headless bool) error
 	InstallAPK(ctx context.Context, ids []string, apkPath string) error
 	Shell(ctx context.Context, ids []string, cmd string) (map[string]string, error)
+	SendFiles(context.Context, SendFilesRequest) error
+	ReceiveFiles(context.Context, string, string, string) (string, error)
+	ListTransferFiles(context.Context, string, string) ([]TransferFile, error)
 	OpenScreen(ctx context.Context, id string) error
+	ReopenScreen(context.Context, string) error
+	GetProjectionSettings(string) (ProjectionSettings, bool, error)
+	SetProjectionSettings(context.Context, string, *ProjectionSettings) error
 	InspectScreenLayout(ctx context.Context) (ScreenLayoutSnapshot, error)
 	ArrangeScreenLayout(ctx context.Context, request ScreenLayoutRequest) (int, error)
 	SaveScreenLayout(context.Context, ScreenLayoutRequest) (int, error)

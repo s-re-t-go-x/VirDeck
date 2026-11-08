@@ -1,7 +1,6 @@
 package emu
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -56,7 +55,7 @@ type LaunchOptions struct {
 type Process struct {
 	cmd    *exec.Cmd
 	done   chan error
-	log    *bytes.Buffer
+	log    *projectionOutput
 	onKill func() error
 }
 
@@ -64,7 +63,7 @@ type Process struct {
 func NewFakeProcess(done chan error, output string, onKill func() error) *Process {
 	return &Process{
 		done:   done,
-		log:    bytes.NewBufferString(output),
+		log:    initialProcessOutput(output),
 		onKill: onKill,
 	}
 }
@@ -87,7 +86,7 @@ func (p *Process) Output() string {
 	if p == nil || p.log == nil {
 		return ""
 	}
-	return strings.TrimSpace(p.log.String())
+	return p.log.text()
 }
 
 // ForceKillTree forcefully terminates the emulator process and its child QEMU process tree.
@@ -114,17 +113,19 @@ func (p *Process) ForceKillTree() error {
 
 // Controller wraps Android SDK discovery, pure-Go AVD creation, emulator process launching, and scrcpy.
 type Controller struct {
-	layoutMu       sync.Mutex
-	reservations   map[string]projectionReservation
-	screenMu       sync.Mutex
-	projections    map[string]*projectionProcess
-	screenHost     projectionHost
-	dataDir        string
-	sdkRoot        string
-	avdHome        string
-	androidHomeDir string
-	scrcpyPath     string
-	adbServerPort  int
+	projectionLocks sync.Map
+	screenLog       func(string, string)
+	layoutMu        sync.Mutex
+	reservations    map[string]projectionReservation
+	screenMu        sync.Mutex
+	projections     map[string]*projectionProcess
+	screenHost      projectionHost
+	dataDir         string
+	sdkRoot         string
+	avdHome         string
+	androidHomeDir  string
+	scrcpyPath      string
+	adbServerPort   int
 }
 
 // DefaultDataDir returns the default unified VirDeckData directory next to the executable (or current working directory).
@@ -509,6 +510,8 @@ func fileExists(path string) bool {
 
 // InspectEnv gathers environment status, tool paths, WHPX acceleration status, path validation, and installed system images.
 func (c *Controller) InspectEnv(ctx context.Context) EnvInfo {
+	ctx, cancel := context.WithTimeout(ctx, time.Duration(config.Values.Runtime.EnvTimeoutSeconds)*time.Second)
+	defer cancel()
 	c.RefreshPaths()
 	_ = c.HealAVDIniPaths()
 
@@ -535,7 +538,12 @@ func (c *Controller) InspectEnv(ctx context.Context) EnvInfo {
 		cmd := exec.CommandContext(ctx, emuBin, "-accel-check")
 		cmd.Env = c.IsolatedEnv()
 		hideConsole(cmd)
+		cmd.WaitDelay = time.Second
 		out, err := cmd.CombinedOutput()
+		if ctx.Err() != nil {
+			err = fmt.Errorf("环境检测等待超时：%w", ctx.Err())
+			out = append(out, []byte(err.Error())...)
+		}
 		msg := strings.TrimSpace(string(out))
 		for _, line := range strings.Split(msg, "\n") {
 			trimmed := strings.TrimSpace(line)
@@ -822,7 +830,7 @@ func (c *Controller) StartProcess(opts LaunchOptions) (*Process, error) {
 	} else {
 		hideConsoleKeepGUI(cmd)
 	}
-	var buf bytes.Buffer
+	var buf projectionOutput
 	cmd.Stdout = &buf
 	cmd.Stderr = &buf
 

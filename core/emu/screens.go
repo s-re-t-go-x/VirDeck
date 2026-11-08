@@ -32,6 +32,7 @@ func (nativeProjectionHost) place(w screenlayout.Window, r screenlayout.Rect) er
 	return screenlayout.Place(w, r)
 }
 func (nativeProjectionHost) activate(w screenlayout.Window) error { return screenlayout.Activate(w) }
+func (nativeProjectionHost) close(w screenlayout.Window) error    { return screenlayout.Close(w) }
 func (nativeProjectionHost) title(w screenlayout.Window, s string) error {
 	return screenlayout.SetTitle(w, s)
 }
@@ -64,11 +65,12 @@ func (b *projectionOutput) text() string {
 }
 
 type projectionProcess struct {
-	cmd    *exec.Cmd
-	done   chan struct{}
-	port   int
-	err    error
-	output projectionOutput
+	intentional bool
+	cmd         *exec.Cmd
+	done        chan struct{}
+	port        int
+	err         error
+	output      projectionOutput
 }
 type ProjectionWindow struct {
 	InstanceID string
@@ -120,6 +122,27 @@ func (c *Controller) StartScrcpy(ctx context.Context, id string, port int, title
 
 // StartProjection reports true only for the caller that created the process.
 func (c *Controller) StartProjection(ctx context.Context, id string, port int, title string) (bool, error) {
+	return c.StartProjectionWithSettings(ctx, id, port, title, config.Values.Projection)
+}
+func (c *Controller) projectionLock(id string) *sync.Mutex {
+	value, _ := c.projectionLocks.LoadOrStore(id, &sync.Mutex{})
+	return value.(*sync.Mutex)
+}
+func (c *Controller) SetProjectionLogger(log func(string, string)) {
+	c.screenMu.Lock()
+	c.screenLog = log
+	c.screenMu.Unlock()
+}
+func (c *Controller) StartProjectionWithSettings(ctx context.Context, id string, port int, title string, settings ProjectionSettings) (bool, error) {
+	lock := c.projectionLock(id)
+	lock.Lock()
+	defer lock.Unlock()
+	return c.startProjectionWithSettings(ctx, id, port, title, settings)
+}
+func (c *Controller) startProjectionWithSettings(ctx context.Context, id string, port int, title string, settings ProjectionSettings) (bool, error) {
+	if err := config.ValidateProjection(settings); err != nil {
+		return false, err
+	}
 	if err := ctx.Err(); err != nil {
 		return false, err
 	}
@@ -172,7 +195,7 @@ func (c *Controller) StartProjection(ctx context.Context, id string, port int, t
 		_ = p.cmd.Process.Kill()
 		select {
 		case <-p.done:
-			return c.StartProjection(ctx, id, port, title)
+			return c.startProjectionWithSettings(ctx, id, port, title, settings)
 		case <-ctx.Done():
 			return false, ctx.Err()
 		case <-time.After(time.Second):
@@ -184,7 +207,9 @@ func (c *Controller) StartProjection(ctx context.Context, id string, port int, t
 		return false, errors.New("旧投屏连接已变化，请关闭旧投屏窗口后重试")
 	}
 	if p == nil {
-		cmd := exec.Command(exe, "-s", fmt.Sprintf("emulator-%d", port), "--window-title", desired)
+		args := []string{"-s", fmt.Sprintf("emulator-%d", port), "--window-title", desired}
+		args = append(args, projectionSettingsArgs(settings)...)
+		cmd := exec.Command(exe, args...)
 		cmd.Env = c.IsolatedEnv()
 		_, adbBin, _, _, _ := c.ResolvePaths()
 		if adbBin != "" {
@@ -208,7 +233,12 @@ func (c *Controller) StartProjection(ctx context.Context, id string, port int, t
 			if c.projections[id] == p {
 				delete(c.projections, id)
 			}
+			logger := c.screenLog
+			intentional := p.intentional
 			c.screenMu.Unlock()
+			if logger != nil && p.err != nil && !intentional {
+				logger(id, fmt.Sprintf("投屏进程已退出：%v\n%s", p.err, p.output.text()))
+			}
 		}(p)
 	}
 	c.screenMu.Unlock()

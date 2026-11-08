@@ -140,6 +140,7 @@ func (vm *viewModel) runTask(t *task) {
 					if err != nil {
 						it.status = itemFailed
 						it.err = oneLine(err.Error())
+						vm.appendLog(fmt.Sprintf("%s / %s 失败：%v", t.title, it.name, err))
 					} else {
 						it.status = itemOK
 					}

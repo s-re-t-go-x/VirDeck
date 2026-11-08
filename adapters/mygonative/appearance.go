@@ -99,7 +99,7 @@ func actionIcon(a action) string {
 		return "stop"
 	case actScreen:
 		return "screen"
-	case actInstallAPK:
+	case actInstallAPK, actTransfer:
 		return "download"
 	case actShell:
 		return "terminal"
@@ -130,18 +130,25 @@ func (vm *viewModel) openSettings() {
 	st := vm.svc.GetSettings()
 	vm.settingsProxy, vm.settingsConcurrent = st.DownloadProxy, float64(st.MaxConcurrent)
 	vm.settingsSavedHint = ""
+	vm.settingsProjection = projectionFormFrom(st.Projection)
+	vm.settingsTab = 0
 	vm.showSettings = true
 }
 
 func (vm *viewModel) buildSettingsModal(c *ui.Context) {
+	_, h := c.Size()
 	ui.Modal(c, &vm.showSettings, func() {
-		modalContent(c, 620).Padding(8).Gap(20).Children(func() {
+		modalContent(c, 620).Padding(8).Gap(14).Children(func() {
 			ui.Row(c).Gap(10).Children(func() { glyph(c, "settings", 20).TextColor(c.Theme().Accent); ui.Text(c, "设置").FontSize(20).Bold() })
-			vm.buildSettingsTab(c)
-			ui.Row(c).Children(func() {
+			ui.Tabs(c, &vm.settingsTab, "常规", "投屏与声音")
+			ui.Scroll(c).Height(min(340, max(110, h-260))).Gap(12).Children(func() { vm.buildSettingsTab(c) })
+			ui.Row(c).Gap(8).Children(func() {
 				ui.Spacer(c)
-				if control(c, "close_settings", "关闭设置", "", false).Clicked() {
+				if ui.Button(c.Key("close_settings"), "关闭设置").Clicked() {
 					vm.showSettings = false
+				}
+				if ui.PrimaryButton(c.Key("save_settings"), "保存全局设置").Clicked() {
+					vm.saveGlobalSettings()
 				}
 			})
 		})

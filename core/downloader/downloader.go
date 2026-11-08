@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"virdeck/config"
 )
@@ -75,6 +76,8 @@ type partMeta struct {
 
 // Client handles proxy-aware HTTP downloads with Range/If-Range resume, SHA-1 verification, and atomic zip extraction.
 type Client struct {
+	proxyMu      sync.RWMutex
+	idleTimeout  time.Duration
 	downloadsDir string
 	proxyURL     string
 }
@@ -83,26 +86,33 @@ type Client struct {
 func New(downloadsDir, proxyURL string) *Client {
 	return &Client{
 		downloadsDir: downloadsDir,
+		idleTimeout:  time.Duration(config.Values.Runtime.DownloadIdleSeconds) * time.Second,
 		proxyURL:     strings.TrimSpace(proxyURL),
 	}
 }
 
 // SetProxy updates the HTTP/SOCKS5 proxy URL used for downloads and XML manifest queries.
 func (c *Client) SetProxy(proxyURL string) {
+	c.proxyMu.Lock()
+	defer c.proxyMu.Unlock()
 	c.proxyURL = strings.TrimSpace(proxyURL)
 }
 
 // Proxy returns the currently configured download proxy URL.
 func (c *Client) Proxy() string {
+	c.proxyMu.RLock()
+	defer c.proxyMu.RUnlock()
 	return c.proxyURL
 }
 
 func (c *Client) httpClient(timeout time.Duration) (*http.Client, error) {
 	tr := http.DefaultTransport.(*http.Transport).Clone()
-	if c.proxyURL != "" {
-		u, err := url.Parse(c.proxyURL)
+	tr.ResponseHeaderTimeout = c.idleTimeout
+	proxy := c.Proxy()
+	if proxy != "" {
+		u, err := url.Parse(proxy)
 		if err != nil {
-			return nil, fmt.Errorf("解析下载代理地址 %q 失败: %w", c.proxyURL, err)
+			return nil, fmt.Errorf("解析下载代理地址 %q 失败: %w", proxy, err)
 		}
 		tr.Proxy = http.ProxyURL(u)
 	}
@@ -178,7 +188,9 @@ func (c *Client) Download(ctx context.Context, targetID, name, urlStr, expectedS
 		return "", err
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, urlStr, nil)
+	watch := newDownloadWatch(ctx, c.idleTimeout)
+	defer watch.close()
+	req, err := http.NewRequestWithContext(watch.ctx, http.MethodGet, urlStr, nil)
 	if err != nil {
 		return "", err
 	}
@@ -193,8 +205,9 @@ func (c *Client) Download(ctx context.Context, targetID, name, urlStr, expectedS
 
 	resp, err := hc.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("请求下载失败: %w", err)
+		return "", fmt.Errorf("请求下载失败: %w", watch.reason(err))
 	}
+	resp.Body = &downloadIdleBody{ReadCloser: resp.Body, watch: watch}
 	defer resp.Body.Close()
 
 	switch resp.StatusCode {

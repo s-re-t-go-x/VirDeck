@@ -487,3 +487,12 @@ func (f *fakeEmu) StartProjection(ctx context.Context, id string, port int, titl
 	}
 	return created, f.StartScrcpy(ctx, id, port, title)
 }
+
+func (f *fakeEmu) StartProjectionWithSettings(ctx context.Context, id string, port int, title string, p emu.ProjectionSettings) (bool, error) {
+	return f.StartProjection(ctx, id, port, title)
+}
+
+func (f *fakeEmu) RestartProjection(ctx context.Context, id string, port int, title string, p emu.ProjectionSettings) error {
+	_, err := f.StartProjectionWithSettings(ctx, id, port, title, p)
+	return err
+}

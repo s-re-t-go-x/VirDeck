@@ -20,6 +20,7 @@ const (
 	actProxy
 	actDelete
 	actCreate
+	actTransfer
 )
 
 func (a action) label() string {
@@ -42,6 +43,8 @@ func (a action) label() string {
 		return "删除"
 	case actCreate:
 		return "新建"
+	case actTransfer:
+		return "文件传输"
 	}
 	return "操作"
 }
@@ -73,7 +76,7 @@ func checkAction(a action, inst service.Instance, busyOp string) (bool, string) 
 		if st == service.Running || st == service.Starting || inst.Port > 0 {
 			return false, "克隆前需先停止"
 		}
-	case actScreen, actInstallAPK, actShell:
+	case actScreen, actInstallAPK, actShell, actTransfer:
 		switch st {
 		case service.Running:
 		case service.Starting:

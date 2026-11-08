@@ -17,6 +17,7 @@ import (
 
 func loadSettings(path string) Settings {
 	def := Settings{
+		Projection:    config.Values.Projection,
 		MaxConcurrent: DefaultMaxConcurrent,
 		ScreenLayout:  ScreenLayoutPreferences{Size: config.Values.ScreenLayout.Size, AutoFill: config.Values.ScreenLayout.AutoFill},
 		ADBServerPort: emu.DefaultADBServerPort,
@@ -30,6 +31,7 @@ func loadSettings(path string) Settings {
 	}
 	s := def
 	if err := json.Unmarshal(raw, &s); err != nil {
+		def.LoadWarning = "读取全局配置失败，暂用默认值：" + err.Error()
 		return def
 	}
 	if s.MaxConcurrent <= 0 {
@@ -40,6 +42,18 @@ func loadSettings(path string) Settings {
 	}
 	if !validScreenSize(s.ScreenLayout.Size) {
 		s.ScreenLayout.Size = def.ScreenLayout.Size
+	}
+	s.Projection = config.NormalizeProjection(s.Projection)
+	if config.ValidateProjection(s.Projection) != nil {
+		s.Projection = def.Projection
+	}
+	for id, p := range s.ProjectionOverrides {
+		p = config.NormalizeProjection(p)
+		if config.ValidateProjection(p) != nil {
+			delete(s.ProjectionOverrides, id)
+		} else {
+			s.ProjectionOverrides[id] = p
+		}
 	}
 	return s
 }
@@ -70,7 +84,7 @@ func saveSettings(path string, s Settings) error {
 func (m *Manager) GetSettings() Settings {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return m.settings
+	return copySettings(m.settings)
 }
 
 // UpdateSettings updates and persists global settings (download proxy, max concurrency, license consent).
@@ -82,6 +96,19 @@ func (m *Manager) UpdateSettings(s Settings) error {
 		s.ADBServerPort = emu.DefaultADBServerPort
 	}
 	s.DownloadProxy = strings.TrimSpace(s.DownloadProxy)
+	if s.Projection.BitRateMbps == 0 {
+		s.Projection = config.Values.Projection
+	}
+	if err := config.ValidateProjection(s.Projection); err != nil {
+		return err
+	}
+	for _, p := range s.ProjectionOverrides {
+		if err := config.ValidateProjection(p); err != nil {
+			return err
+		}
+	}
+	s = copySettings(s)
+	s.LoadWarning = ""
 	if s.ScreenLayout.Size == "" {
 		s.ScreenLayout.Size = config.Values.ScreenLayout.Size
 	}

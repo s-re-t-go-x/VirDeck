@@ -22,12 +22,17 @@ type CreateDefaults struct {
 	Image      string `json:"image"`
 }
 type RuntimeDefaults struct {
-	MinPort            int `json:"minPort"`
-	MaxPort            int `json:"maxPort"`
-	MaxConcurrent      int `json:"maxConcurrent"`
-	ADBServerPort      int `json:"adbServerPort"`
-	StopGraceSeconds   int `json:"stopGraceSeconds"`
-	BootTimeoutSeconds int `json:"bootTimeoutSeconds"`
+	ProjectionAudioCodec  string `json:"projectionAudioCodec"`
+	CommandTimeoutSeconds int    `json:"commandTimeoutSeconds"`
+	InstallTimeoutSeconds int    `json:"installTimeoutSeconds"`
+	EnvTimeoutSeconds     int    `json:"envTimeoutSeconds"`
+	DownloadIdleSeconds   int    `json:"downloadIdleSeconds"`
+	MinPort               int    `json:"minPort"`
+	MaxPort               int    `json:"maxPort"`
+	MaxConcurrent         int    `json:"maxConcurrent"`
+	ADBServerPort         int    `json:"adbServerPort"`
+	StopGraceSeconds      int    `json:"stopGraceSeconds"`
+	BootTimeoutSeconds    int    `json:"bootTimeoutSeconds"`
 }
 type Sources struct {
 	RepositoryXML string `json:"repositoryXML"`
@@ -57,7 +62,48 @@ type ScreenLayoutDefaults struct {
 	WindowTimeoutSeconds int    `json:"windowTimeoutSeconds"`
 }
 
+type ProjectionDefaults struct {
+	MaxFPS      int  `json:"maxFPS"`
+	MaxSize     int  `json:"maxSize"`
+	BitRateMbps int  `json:"bitRateMbps"`
+	Audio       bool `json:"audio"`
+}
+
+const (
+	MinProjectionFPS  = 5
+	MinProjectionSize = 320
+)
+
+// NormalizeProjection upgrades the old zero-as-unlimited fields to compiled defaults.
+// Other saved preferences, including bitrate and audio, remain unchanged.
+func NormalizeProjection(p ProjectionDefaults) ProjectionDefaults {
+	if p.MaxFPS == 0 {
+		p.MaxFPS = Values.Projection.MaxFPS
+	}
+	if p.MaxSize == 0 {
+		p.MaxSize = Values.Projection.MaxSize
+	}
+	if p.BitRateMbps == 0 {
+		p.BitRateMbps = Values.Projection.BitRateMbps
+	}
+	return p
+}
+
+func ValidateProjection(p ProjectionDefaults) error {
+	if p.MaxFPS < MinProjectionFPS || p.MaxFPS > 240 {
+		return errors.New("投屏帧率需为 5–240 FPS")
+	}
+	if p.MaxSize < MinProjectionSize || p.MaxSize > 8192 {
+		return errors.New("投屏最长边需为 320–8192 像素")
+	}
+	if p.BitRateMbps < 1 || p.BitRateMbps > 100 {
+		return errors.New("投屏码率需为 1–100 Mbps")
+	}
+	return nil
+}
+
 type Defaults struct {
+	Projection   ProjectionDefaults   `json:"projection"`
 	ScreenLayout ScreenLayoutDefaults `json:"screenLayout"`
 	CloneCount   int                  `json:"cloneCount"`
 	Create       CreateDefaults       `json:"create"`
@@ -79,8 +125,17 @@ func decode(raw []byte, d *Defaults) error {
 		return errors.New("新建实例默认配置无效")
 	}
 	r := d.Runtime
+	if r.ProjectionAudioCodec != "aac" && r.ProjectionAudioCodec != "opus" {
+		return errors.New("默认音频编码无效")
+	}
+	if r.CommandTimeoutSeconds < 1 || r.InstallTimeoutSeconds < 1 || r.EnvTimeoutSeconds < 1 || r.DownloadIdleSeconds < 1 {
+		return errors.New("默认等待超时配置无效")
+	}
 	if r.MinPort < 1024 || r.MaxPort > 65534 || r.MinPort > r.MaxPort || r.MinPort%2 != 0 || r.MaxPort%2 != 0 || r.MaxConcurrent < 1 || r.ADBServerPort < 1 || r.ADBServerPort > 65535 || r.StopGraceSeconds < 1 || r.BootTimeoutSeconds < 1 {
 		return errors.New("运行环境默认配置无效")
+	}
+	if err := ValidateProjection(d.Projection); err != nil {
+		return err
 	}
 	layout := d.ScreenLayout
 	if layout.Size != "auto" && layout.Size != "small" && layout.Size != "medium" && layout.Size != "large" {

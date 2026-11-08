@@ -1,7 +1,6 @@
 package adb
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -10,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"virdeck/config"
 )
 
 // Client wraps the Android Debug Bridge (adb) CLI for single and batch instance operations.
@@ -58,9 +58,15 @@ func Serial(port int) string {
 }
 
 func (c *Client) run(ctx context.Context, args ...string) (string, error) {
+	timeout := config.Values.Runtime.CommandTimeoutSeconds
+	if len(args) > 2 && args[2] == "install" {
+		timeout = config.Values.Runtime.InstallTimeoutSeconds
+	}
+	ctx, cancel := context.WithTimeout(ctx, time.Duration(timeout)*time.Second)
+	defer cancel()
 	c.mu.RLock()
 	bin := c.adbPath
-	env := c.env
+	env := append([]string(nil), c.env...)
 	c.mu.RUnlock()
 
 	cmd := exec.CommandContext(ctx, bin, args...)
@@ -69,12 +75,15 @@ func (c *Client) run(ctx context.Context, args ...string) (string, error) {
 		cmd.Env = env
 	}
 	hideConsole(cmd)
-	var out bytes.Buffer
+	var out adbOutputTail
 	cmd.Stdout = &out
 	cmd.Stderr = &out
 	err := cmd.Run()
-	text := strings.TrimSpace(out.String())
+	text := out.text()
 	if err != nil {
+		if ctx.Err() != nil {
+			err = errors.Join(err, ctx.Err())
+		}
 		if text != "" {
 			return text, fmt.Errorf("adb %s: %w (%s)", strings.Join(args, " "), err, text)
 		}

@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"fmt"
-	"log"
 	"os"
 	"strings"
 
@@ -19,7 +18,8 @@ func main() {
 		RegistryPath: registryPath,
 	})
 	if err != nil {
-		log.Fatalf("初始化核心服务失败: %v", err)
+		showStartupError("初始化核心服务失败：" + err.Error())
+		os.Exit(1)
 	}
 
 	args := os.Args[1:]
@@ -35,6 +35,7 @@ func main() {
 	}
 
 	if err := mygonative.Run(mgr); err != nil {
-		log.Fatalf("界面运行异常: %v", err)
+		showStartupError("界面运行异常：" + err.Error())
+		os.Exit(1)
 	}
 }

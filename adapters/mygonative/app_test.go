@@ -977,6 +977,11 @@ func TestAllDialogsKeepNarrowWindowContentInsidePanel(t *testing.T) {
 		prep        func(*viewModel)
 		render      func(*viewModel, *ui.Context)
 	}{
+		{"groups", "分组管理", func(vm *viewModel) { vm.groups.show = true }, (*viewModel).buildGroupsModal},
+		{"projection_settings", "投屏设置", func(vm *viewModel) {
+			vm.svc = &projectionTestSvc{Service: vm.svc, p: service.ProjectionSettings{BitRateMbps: 8}}
+			vm.openProjectionSettings(vm.instances[0])
+		}, (*viewModel).buildProjectionSettingsModal},
 		{"screen_layout", "投屏排版", func(vm *viewModel) {
 			vm.screens.show = true
 			vm.screens.snapshot = sampleScreenSnapshot()
