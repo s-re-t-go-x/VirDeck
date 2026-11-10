@@ -13,3 +13,14 @@ var IconSVG []byte
 //
 //go:embed icon.png
 var IconPNG []byte
+
+// IconCLISVG is the resolution-independent CLI tool mark (cool slate gray, lower saturation).
+//
+//go:embed icon-cli.svg
+var IconCLISVG []byte
+
+// IconCLIPNG is the rasterized CLI tool icon.
+//
+//go:embed icon-cli.png
+var IconCLIPNG []byte
+

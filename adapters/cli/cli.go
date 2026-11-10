@@ -13,6 +13,7 @@ import (
 	"virdeck/config"
 
 	"virdeck/assets"
+	"virdeck/core/screenlayout"
 	"virdeck/core/service"
 )
 
@@ -68,11 +69,11 @@ func Run(ctx context.Context, svc service.Service, args []string, out io.Writer)
 func printUsage(w io.Writer) {
 	fmt.Fprintf(w, "%s %s 命令行工具\n\n", assets.Product.Name, assets.Product.Version)
 	fmt.Fprintln(w, `用法:
-  VirDeck.exe cli <command> [arguments]
-  virdeck-cli.exe <command> [arguments]
+  VirDeck cli <command> [arguments]
+  virdeck-cli <command> [arguments]
 
 可用命令:
-  env                                    自检 VirDeckData、WHPX 硬件加速、adb/emulator/scrcpy 路径与可用镜像
+  env                                    自检 VirDeckData、宿主硬件加速、adb/emulator/scrcpy 路径与可用镜像
   images [-sync] [-download <包ID>] [-import <包ID> -zip <路径>] [-rm <包ID>]
                                          管理系统镜像目录（推荐 + 官方 XML 同步 + 本地导入 + 删除）
   bootstrap [-tool all|adb|emulator|scrcpy] [-zip <离线包路径>]
@@ -89,7 +90,7 @@ func printUsage(w io.Writer) {
                                          向指定（或全部运行中）实例并发安装 APK
   shell -cmd "<命令>" <ID|名称|running>...
                                          向指定（或全部运行中）实例并发执行 adb shell 命令
-  screen <ID或名称>                      拉起指定运行中实例的 scrcpy 独立投屏窗口`)
+  screen [-x X -y Y -width W -height H] <ID或名称>                      拉起指定运行中实例的 scrcpy 独立投屏窗口`)
 }
 
 func runEnv(ctx context.Context, svc service.Service, out io.Writer) error {
@@ -118,7 +119,7 @@ func runEnv(ctx context.Context, svc service.Service, out io.Writer) error {
 func runImages(ctx context.Context, svc service.Service, args []string, out io.Writer) error {
 	fs := flag.NewFlagSet("images", flag.ContinueOnError)
 	fs.SetOutput(out)
-	syncFlag := fs.Bool("sync", false, "从 Google 官方仓库同步最新 x86_64 镜像列表")
+	syncFlag := fs.Bool("sync", false, "从 Google 官方仓库同步当前宿主架构镜像列表")
 	dlID := fs.String("download", "", "下载并安装指定镜像包 ID")
 	impID := fs.String("import", "", "要导入的目标镜像包 ID")
 	zipPath := fs.String("zip", "", "导入时使用的本地 .zip 文件路径")
@@ -424,15 +425,37 @@ func runShell(ctx context.Context, svc service.Service, args []string, out io.Wr
 }
 
 func runScreen(ctx context.Context, svc service.Service, args []string, out io.Writer) error {
-	if len(args) == 0 {
-		return errors.New("请指定要打开投屏的实例 ID 或名称")
+	fs := flag.NewFlagSet("screen", flag.ContinueOnError)
+	fs.SetOutput(out)
+	x := fs.Int("x", 0, "投屏窗口初始 X 坐标")
+	y := fs.Int("y", 0, "投屏窗口初始 Y 坐标")
+	width := fs.Int("width", 0, "投屏客户区宽度")
+	height := fs.Int("height", 0, "投屏客户区高度")
+	if err := fs.Parse(args); err != nil {
+		return err
 	}
-	ids, err := resolveTargets(ctx, svc, args)
+	positioned := false
+	fs.Visit(func(*flag.Flag) { positioned = true })
+	if positioned && (*width <= 0 || *height <= 0 || *width > 32768 || *height > 32768 || *x < -32768 || *x > 32768 || *y < -32768 || *y > 32768) {
+		return errors.New("指定坐标时，宽高需为 1–32768，坐标范围为 -32768–32768")
+	}
+	ids, err := resolveTargets(ctx, svc, fs.Args())
 	if err != nil {
 		return err
 	}
 	for _, id := range ids {
-		if err := svc.OpenScreen(ctx, id); err != nil {
+		if positioned {
+			opener, ok := svc.(interface {
+				OpenScreenAt(context.Context, string, screenlayout.Rect) error
+			})
+			if !ok {
+				return errors.New("当前后端不支持指定投屏窗口坐标")
+			}
+			err = opener.OpenScreenAt(ctx, id, screenlayout.Rect{X: *x, Y: *y, Width: *width, Height: *height})
+		} else {
+			err = svc.OpenScreen(ctx, id)
+		}
+		if err != nil {
 			return err
 		}
 		fmt.Fprintf(out, "已拉起实例 %s 的 scrcpy 窗口\n", id)

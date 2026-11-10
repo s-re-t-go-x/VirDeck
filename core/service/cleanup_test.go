@@ -1,6 +1,8 @@
 package service
 
 import (
+	"archive/tar"
+	"compress/gzip"
 	"context"
 	"os"
 	"path/filepath"
@@ -85,5 +87,47 @@ func TestCleanupADBFaultBlocksAVDOnly(t *testing.T) {
 	removed, err := m.CleanCaches(context.Background(), CleanupOptions{Downloads: true})
 	if err != nil || removed.Files != 1 {
 		t.Fatalf("download cleanup incorrectly blocked: %+v, %v", removed, err)
+	}
+}
+
+func TestImportBaseToolTarGzAndCleanupTarballs(t *testing.T) {
+	m, _, _ := newTestManager(t, 2, time.Millisecond)
+	m.cfg.DataDir = t.TempDir()
+	tarPath := filepath.Join(m.cfg.DataDir, "downloads", "scrcpy-macos-aarch64-v3.1.tar.gz")
+	if err := os.MkdirAll(filepath.Dir(tarPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.Create(tarPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gz := gzip.NewWriter(f)
+	tw := tar.NewWriter(gz)
+	payload := []byte("scrcpy-bin")
+	if err := tw.WriteHeader(&tar.Header{Name: "scrcpy-macos-aarch64-v3.1/scrcpy", Mode: 0o755, Size: int64(len(payload))}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tw.Write(payload); err != nil {
+		t.Fatal(err)
+	}
+	_ = tw.Close()
+	_ = gz.Close()
+	_ = f.Close()
+
+	if err := m.ImportBaseToolZip(context.Background(), "scrcpy", tarPath); err != nil {
+		t.Fatalf("ImportBaseToolZip(.tar.gz) failed: %v", err)
+	}
+	got, err := os.ReadFile(filepath.Join(m.cfg.DataDir, "scrcpy", "scrcpy"))
+	if err != nil || string(got) != "scrcpy-bin" {
+		t.Fatalf("extracted scrcpy binary mismatch: %q, %v", got, err)
+	}
+
+	report, err := m.ScanCleanup(context.Background())
+	if err != nil || report.Downloads.Files != 1 {
+		t.Fatalf("ScanCleanup missed .tar.gz download: %+v, %v", report, err)
+	}
+	removed, err := m.CleanCaches(context.Background(), CleanupOptions{Downloads: true})
+	if err != nil || removed.Files != 1 {
+		t.Fatalf("CleanCaches missed .tar.gz download: %+v, %v", removed, err)
 	}
 }

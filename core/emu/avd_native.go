@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"virdeck/config"
@@ -109,7 +110,11 @@ func (c *Controller) CreateAVDNative(name, systemImage string, memoryMB, cores i
 	w("hw.battery", "yes")
 	w("hw.camera.back", "virtualscene")
 	w("hw.camera.front", "emulated")
-	w("hw.cpu.arch", abi)
+	cpuArch := abi
+	if abi == "arm64-v8a" {
+		cpuArch = "arm64"
+	}
+	w("hw.cpu.arch", cpuArch)
 	w("hw.cpu.ncore", strconv.Itoa(cores))
 	w("hw.dPad", "no")
 	w("hw.device.manufacturer", "Google")
@@ -154,7 +159,7 @@ func (c *Controller) CreateAVDNative(name, systemImage string, memoryMB, cores i
 	}
 
 	iniPath := filepath.Join(c.avdHome, name+".ini")
-	iniContent := fmt.Sprintf("avd.ini.encoding=UTF-8\npath=%s\npath.rel=avd\\%s.avd\ntarget=%s\n", avdDir, name, apiFolder)
+	iniContent := fmt.Sprintf("avd.ini.encoding=UTF-8\npath=%s\npath.rel=%s\ntarget=%s\n", avdDir, filepath.Join("avd", name+".avd"), apiFolder)
 	if err := os.WriteFile(iniPath, []byte(iniContent), 0o644); err != nil {
 		return fmt.Errorf("写入 %s.ini 失败: %w", name, err)
 	}
@@ -202,7 +207,11 @@ func EnsureSystemImageMetadata(sdkRoot, systemImage string) error {
 	}
 	desc := strings.TrimSpace(props["Pkg.Desc"])
 	if desc == "" {
-		desc = fmt.Sprintf("Google Play Intel %s Atom System Image (API %s)", abi, apiLevel)
+		if strings.HasPrefix(abi, "arm") {
+			desc = fmt.Sprintf("ARM %s System Image (API %s)", abi, apiLevel)
+		} else {
+			desc = fmt.Sprintf("Google Play Intel %s Atom System Image (API %s)", abi, apiLevel)
+		}
 	}
 
 	// Ensure source.properties exists if the zip didn't have one.
@@ -320,7 +329,7 @@ func (c *Controller) HealAVDIniPaths() error {
 					changed = true
 				}
 			case "path.rel":
-				rel := "avd\\" + baseName + ".avd"
+				rel := filepath.Join("avd", baseName+".avd")
 				if strings.TrimSpace(v) != rel {
 					lines[i] = "path.rel=" + rel
 					changed = true
@@ -334,12 +343,16 @@ func (c *Controller) HealAVDIniPaths() error {
 	return nil
 }
 
-// ValidateDataDir checks whether dataDir contains non-ASCII characters (which break QEMU/Android Emulator)
-// and whether dataDir is writable.
+// ValidateDataDir checks path compatibility and write access. The legacy ASCII
+// restriction applies to Windows emulator paths; Unix accepts UTF-8 paths.
 func ValidateDataDir(dataDir string) (asciiOK bool, writableOK bool, warningMsg string) {
+	return validateDataDirForHost(dataDir, runtime.GOOS)
+}
+
+func validateDataDirForHost(dataDir, host string) (asciiOK bool, writableOK bool, warningMsg string) {
 	asciiOK = true
 	for i := 0; i < len(dataDir); i++ {
-		if dataDir[i] >= 0x80 {
+		if host == "windows" && dataDir[i] >= 0x80 {
 			asciiOK = false
 			break
 		}

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -62,6 +63,9 @@ type persistedCatalog struct {
 // 2. Official Android SDK XML synced list
 // 3. User custom entries and local scanned directories
 type Store struct {
+	defaults config.Defaults
+	goos     string
+	goarch   string
 	mu       sync.RWMutex
 	filePath string
 	sdkRoot  string
@@ -70,8 +74,12 @@ type Store struct {
 
 // BuiltinRecommended returns shipped image presets from config/defaults.json.
 func BuiltinRecommended() []ImageItem {
+	return recommended(config.Values)
+}
+
+func recommended(defaults config.Defaults) []ImageItem {
 	var out []ImageItem
-	for _, p := range config.Values.Images {
+	for _, p := range defaults.Images {
 		out = append(out, ImageItem{ID: p.ID, Name: p.Name, APILevel: p.APILevel, TagID: p.TagID, ABI: p.ABI, URL: p.URL, SHA1: p.SHA1, Source: SourceRecommended})
 	}
 	return out
@@ -79,7 +87,19 @@ func BuiltinRecommended() []ImageItem {
 
 // NewStore loads or initializes a catalog Store backed by filePath and scanning sdkRoot.
 func NewStore(filePath, sdkRoot string) (*Store, error) {
+	return NewStoreForHost(filePath, sdkRoot, runtime.GOOS, runtime.GOARCH)
+}
+
+// NewStoreForHost supports catalogs for explicit host architectures.
+func NewStoreForHost(filePath, sdkRoot, goos, goarch string) (*Store, error) {
+	defaults, err := config.ForHost(goos, goarch)
+	if err != nil {
+		return nil, err
+	}
 	s := &Store{
+		defaults: defaults,
+		goos:     goos,
+		goarch:   goarch,
 		filePath: filePath,
 		sdkRoot:  sdkRoot,
 	}
@@ -98,7 +118,7 @@ func NewStore(filePath, sdkRoot string) (*Store, error) {
 	}
 	nextVersion := max(1, previousVersion)
 	changed := fresh || s.data.FavoritesVersion == 0
-	for _, p := range config.Values.Images {
+	for _, p := range s.defaults.Images {
 		version := max(1, p.FavoriteVersion)
 		nextVersion = max(nextVersion, version)
 		if !p.Favorite || (!fresh && version <= previousVersion) {
@@ -192,7 +212,7 @@ func (s *Store) List(installedPackages []string) []ImageItem {
 	var out []ImageItem
 
 	// 1. Recommended presets (enriched with latest URL/SHA1/Size from synced official list if available).
-	for _, rec := range BuiltinRecommended() {
+	for _, rec := range recommended(s.defaults) {
 		if off, ok := officialByID[rec.ID]; ok {
 			if off.URL != "" {
 				rec.URL = off.URL
@@ -269,6 +289,13 @@ func (s *Store) List(installedPackages []string) []ImageItem {
 	filtered := out[:0]
 	for _, item := range out {
 		if isPrerelease(item) {
+			continue
+		}
+		abi := item.ABI
+		if abi == "" {
+			_, _, abi = SplitPackageID(item.ID)
+		}
+		if (item.Source == SourceRecommended || item.Source == SourceOfficial) && !s.compatibleABI(abi) && !item.Installed {
 			continue
 		}
 		if item.Source == SourceOfficial {
@@ -349,7 +376,7 @@ func (s *Store) RemoveCustom(id string) error {
 	return nil
 }
 
-// SyncFromOfficial fetches Google's official sys-img2-3.xml manifests and caches x86_64 images (API 30+).
+// SyncFromOfficial caches stable official images compatible with the host ABI.
 func (s *Store) SyncFromOfficial(ctx context.Context, dl *downloader.Client) (int, error) {
 	urls := []string{
 		downloader.GoogleSysImgPlayStoreXMLURL,
@@ -362,14 +389,14 @@ func (s *Store) SyncFromOfficial(ctx context.Context, dl *downloader.Client) (in
 	seen := make(map[string]bool)
 
 	for _, u := range urls {
-		pkgs, err := dl.FetchRepositoryPackages(ctx, u)
+		pkgs, err := dl.FetchRepositoryPackagesForHost(ctx, u, s.goos, s.goarch)
 		if err != nil {
 			errs = append(errs, err)
 			continue
 		}
 		for _, p := range pkgs {
 			api, tag, abi := SplitPackageID(p.PackagePath)
-			if abi != "x86_64" || api == "" || tag == "" || downloader.IsPrerelease(p.PackagePath+" "+p.DisplayName) {
+			if !s.compatibleABI(abi) || api == "" || tag == "" || downloader.IsPrerelease(p.PackagePath+" "+p.DisplayName) {
 				continue
 			}
 			if seen[p.PackagePath] {
@@ -412,6 +439,13 @@ func (s *Store) SyncFromOfficial(ctx context.Context, dl *downloader.Client) (in
 	err := s.saveLocked()
 	s.mu.Unlock()
 	return len(fetched), err
+}
+
+func (s *Store) compatibleABI(abi string) bool {
+	if s.goarch == "arm64" {
+		return abi == "arm64-v8a"
+	}
+	return abi == "x86_64" || (s.goos == "windows" && abi == "x86")
 }
 
 func (s *Store) imageDirLocked(pkgID string) string {

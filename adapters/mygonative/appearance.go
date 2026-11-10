@@ -2,6 +2,7 @@ package mygonative
 
 import (
 	"github.com/egoist/mygo/ui"
+	"runtime"
 	"virdeck/assets"
 )
 
@@ -25,7 +26,7 @@ var workbenchTheme = func() *ui.Theme {
 	t.Success = ui.Hex("#438b79")
 	t.Warning = ui.Hex("#b08a43")
 	t.Danger = ui.Hex("#c46570")
-	t.Font, t.FontSize = "Microsoft YaHei UI", 13
+	t.Font, t.FontSize = platformFont(runtime.GOOS), 13
 	t.Radius = 6
 	return t
 }()
@@ -206,4 +207,27 @@ func quietMenu(c *ui.Context, key, label string, build func(*ui.Menu)) ui.Elemen
 func modalContent(c *ui.Context, preferredWidth float32) ui.Element {
 	w, _ := c.Size()
 	return ui.Column(c).Width(min(preferredWidth, max(0, w-c.Theme().Space(20))))
+}
+
+func platformFont(host string) string {
+	switch host {
+	case "windows":
+		return "Microsoft YaHei UI"
+	case "darwin":
+		return "PingFang SC"
+	default:
+		return "sans-serif"
+	}
+}
+func hostComputerName(host string) string {
+	switch host {
+	case "windows":
+		return "Windows"
+	case "darwin":
+		return "macOS"
+	case "linux":
+		return "Linux"
+	default:
+		return "电脑"
+	}
 }

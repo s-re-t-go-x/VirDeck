@@ -6,6 +6,7 @@
 /dist/
 /.artifacts/
 /.superpowers/
+/.zed/
 *.exe
 *.test
 *.out

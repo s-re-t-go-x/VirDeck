@@ -1,0 +1,101 @@
+name: Cross-platform checks & Release
+on:
+  workflow_dispatch:
+    inputs:
+      create_release:
+        type: boolean
+        description: '是否发布 GitHub Release'
+        default: true
+      tag_name:
+        type: string
+        description: 'Release 标签名（如 v0.9.0 或 v0.9.0-beta，留空自动提取版本）'
+        default: ''
+      prerelease:
+        type: boolean
+        description: '是否标记为预发布 (Pre-release)'
+        default: true
+      release_title:
+        type: string
+        description: 'Release 标题（留空自动使用标签名）'
+        default: ''
+
+permissions:
+  contents: write
+
+jobs:
+  native:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [windows-latest, macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Linux desktop and font dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libgtk-3-0 libwebkit2gtk-4.1-0 libepoxy0 fonts-noto-cjk xvfb xauth
+      - name: Static checks
+        run: go vet ./...
+      - name: Native tests (Linux)
+        if: runner.os == 'Linux'
+        run: xvfb-run -a go test ./... -count=1 -timeout 5m
+      - name: Native tests (Windows and macOS)
+        if: runner.os != 'Linux'
+        run: go test ./... -count=1 -timeout 5m
+      - name: Build unsigned development binaries
+        run: go run ./scripts/package
+      - uses: actions/upload-artifact@v4
+        with:
+          name: VirDeck-${{ runner.os }}-${{ runner.arch }}
+          path: |
+            dist/VirDeck-*
+            dist/virdeck-cli-*
+
+  release:
+    name: Publish Release
+    needs: native
+    if: |
+      always() &&
+      needs.native.result == 'success' &&
+      inputs.create_release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download all built binaries
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Prepare release assets and metadata
+        id: meta
+        shell: bash
+        run: |
+          mkdir -p release-assets
+          find artifacts -type f \( -name "VirDeck-*" -o -name "virdeck-cli-*" \) -exec cp {} release-assets/ \;
+          echo "=== Release Assets ==="
+          ls -lh release-assets
+
+          TAG="${{ inputs.tag_name }}"
+          if [ -z "$TAG" ]; then
+            VERSION=$(grep '"version"' assets/product.json | head -n 1 | awk -F '"' '{print $4}')
+            TAG="v${VERSION}"
+          fi
+          PRERELEASE="${{ inputs.prerelease }}"
+          TITLE="${{ inputs.release_title }}"
+          if [ -z "$TITLE" ]; then
+            TITLE="$TAG"
+          fi
+
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+          echo "title=$TITLE" >> $GITHUB_OUTPUT
+          echo "prerelease=$PRERELEASE" >> $GITHUB_OUTPUT
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.meta.outputs.tag }}
+          name: ${{ steps.meta.outputs.title }}
+          files: release-assets/*
+          prerelease: ${{ steps.meta.outputs.prerelease == 'true' }}
+          generate_release_notes: true

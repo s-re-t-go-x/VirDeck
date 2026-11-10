@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"virdeck/config"
@@ -349,7 +350,7 @@ func (m *Manager) EnsureBaseTool(ctx context.Context, tool string) error {
 		return err
 	}
 
-	if err := downloader.ExtractZipAtomically(ctx, zipPath, destDir, m.onDownloadProgress, "tool:"+tool, title); err != nil {
+	if err := downloader.ExtractArchiveAtomically(ctx, zipPath, destDir, m.onDownloadProgress, "tool:"+tool, title); err != nil {
 		m.emitDownloadFailed("tool:"+tool, title, err)
 		return err
 	}
@@ -364,14 +365,14 @@ func (m *Manager) EnsureBaseTool(ctx context.Context, tool string) error {
 	return nil
 }
 
-// ImportBaseToolZip imports a user-provided local .zip archive for "adb", "emulator", or "scrcpy".
+// ImportBaseToolZip imports a user-provided local archive (.zip / .tar.gz / .tgz) for "adb", "emulator", or "scrcpy".
 func (m *Manager) ImportBaseToolZip(ctx context.Context, tool, zipPath string) error {
 	m.maintenance.RLock()
 	defer m.maintenance.RUnlock()
 	tool = strings.ToLower(strings.TrimSpace(tool))
 	zipPath = strings.TrimSpace(zipPath)
 	if zipPath == "" {
-		return errors.New("请选择要导入的本地 .zip 压缩包")
+		return errors.New("请选择要导入的本地压缩包")
 	}
 	var destDir, title string
 	switch tool {
@@ -388,7 +389,7 @@ func (m *Manager) ImportBaseToolZip(ctx context.Context, tool, zipPath string) e
 		return fmt.Errorf("未知的基础工具类型: %s (可选: adb, emulator, scrcpy)", tool)
 	}
 	m.emitLog("", fmt.Sprintf("正在导入本地组件包 %s -> %s", filepath.Base(zipPath), destDir))
-	if err := downloader.ExtractZipAtomically(ctx, zipPath, destDir, m.onDownloadProgress, "tool:"+tool, title); err != nil {
+	if err := downloader.ExtractArchiveAtomically(ctx, zipPath, destDir, m.onDownloadProgress, "tool:"+tool, title); err != nil {
 		m.emitDownloadFailed("tool:"+tool, title, err)
 		return err
 	}
@@ -413,6 +414,9 @@ func (m *Manager) resolveBaseToolSource(ctx context.Context, tool string) (urlSt
 				}
 			}
 		}
+		if urlStr == "" {
+			err = fmt.Errorf("Google 未提供适配 %s/%s 的 platform-tools 下载，请配置本地兼容的 Android SDK", runtime.GOOS, runtime.GOARCH)
+		}
 		return
 	case "emulator":
 		title = "Android Emulator"
@@ -428,11 +432,14 @@ func (m *Manager) resolveBaseToolSource(ctx context.Context, tool string) (urlSt
 				return
 			}
 		}
-		return "", "", "", "", errors.New("未在官方仓库索引中找到 Windows x64 版 emulator")
+		return "", "", "", "", fmt.Errorf("未在官方仓库索引中找到 %s/%s 版 emulator", runtime.GOOS, runtime.GOARCH)
 	case "scrcpy":
 		title = "scrcpy 投屏工具"
 		destDir = filepath.Join(m.dataDir(), "scrcpy")
 		urlStr = downloader.FallbackScrcpyURL
+		if urlStr == "" {
+			err = fmt.Errorf("scrcpy 未提供适配 %s/%s 的官方预编译包，请安装本地 scrcpy", runtime.GOOS, runtime.GOARCH)
+		}
 		return
 	default:
 		return "", "", "", "", fmt.Errorf("不支持的工具类型: %s", tool)

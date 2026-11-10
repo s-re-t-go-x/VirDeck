@@ -27,7 +27,7 @@
     "googleAPIsXML": "https://dl.google.com/android/repository/sys-img/google_apis/sys-img2-3.xml",
     "defaultXML": "https://dl.google.com/android/repository/sys-img/android/sys-img2-3.xml",
     "platformTools": "https://dl.google.com/android/repository/platform-tools-latest-windows.zip",
-    "scrcpy": "https://github.com/Genymobile/scrcpy/releases/download/v3.1/scrcpy-win64-v3.1.zip"
+    "scrcpy": "https://github.com/Genymobile/scrcpy/releases/download/v5.0.1/scrcpy-win64-v5.0.1.zip"
   },
   "images": [
     {
@@ -139,6 +139,55 @@
         "maxSize": 1920,
         "bitRateMbps": 16
       }
+    }
+  ],
+  "hostSources": {
+    "windows/amd64": {
+      "platformTools": "https://dl.google.com/android/repository/platform-tools-latest-windows.zip",
+      "scrcpy": "https://github.com/Genymobile/scrcpy/releases/download/v5.0.1/scrcpy-win64-v5.0.1.zip"
+    },
+    "windows/arm64": {
+      "platformTools": "",
+      "scrcpy": "https://github.com/Genymobile/scrcpy/releases/download/v5.0.1/scrcpy-winarm64-v5.0.1.zip"
+    },
+    "darwin/amd64": {
+      "platformTools": "https://dl.google.com/android/repository/platform-tools-latest-darwin.zip",
+      "scrcpy": "https://github.com/Genymobile/scrcpy/releases/download/v5.0.1/scrcpy-macos-x86_64-v5.0.1.tar.gz"
+    },
+    "darwin/arm64": {
+      "platformTools": "https://dl.google.com/android/repository/platform-tools-latest-darwin.zip",
+      "scrcpy": "https://github.com/Genymobile/scrcpy/releases/download/v5.0.1/scrcpy-macos-aarch64-v5.0.1.tar.gz"
+    },
+    "linux/amd64": {
+      "platformTools": "https://dl.google.com/android/repository/platform-tools-latest-linux.zip",
+      "scrcpy": "https://github.com/Genymobile/scrcpy/releases/download/v5.0.1/scrcpy-linux-x86_64-v5.0.1.tar.gz"
+    },
+    "linux/arm64": {
+      "platformTools": "",
+      "scrcpy": ""
+    }
+  },
+  "armImages": [
+    {
+      "url": "",
+      "favorite": true,
+      "favoriteVersion": 3,
+      "apiLevel": "30",
+      "note": "Apple Silicon 日常多开首选",
+      "abi": "arm64-v8a",
+      "name": "Android 11 (API 30) - Google Play 商店 · ARM64",
+      "tagId": "google_apis_playstore",
+      "id": "system-images;android-30;google_apis_playstore;arm64-v8a"
+    },
+    {
+      "abi": "arm64-v8a",
+      "note": "",
+      "name": "Android 14 (API 34) - Google Play 商店 · ARM64",
+      "url": "",
+      "favorite": false,
+      "id": "system-images;android-34;google_apis_playstore;arm64-v8a",
+      "tagId": "google_apis_playstore",
+      "apiLevel": "34"
     }
   ]
 }

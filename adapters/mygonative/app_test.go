@@ -867,8 +867,11 @@ func TestEditMenuSavesExistingInstanceAndReplacesRename(t *testing.T) {
 
 func TestCreateImagePickerMarksInstalledAndKeepsPackageID(t *testing.T) {
 	vm := newTestVM(t)
-	installed := "system-images;android-30;google_apis_playstore;x86_64"
-	missing := "system-images;android-34;google_apis_playstore;x86_64"
+	if len(defaultImageSuggestions) < 2 {
+		t.Fatal("need at least two image suggestions for test")
+	}
+	installed := defaultImageSuggestions[0]
+	missing := defaultImageSuggestions[1]
 	vm.env.SystemImages = []string{installed}
 	vm.createImage = missing
 	vm.showCreate = true

@@ -100,15 +100,7 @@ func (p *Process) ForceKillTree() error {
 	if p.cmd == nil || p.cmd.Process == nil {
 		return nil
 	}
-	pid := p.cmd.Process.Pid
-	if runtime.GOOS == "windows" {
-		killCmd := exec.Command("taskkill", "/F", "/T", "/PID", strconv.Itoa(pid))
-		hideConsole(killCmd)
-		if err := killCmd.Run(); err == nil {
-			return nil
-		}
-	}
-	return p.cmd.Process.Kill()
+	return forceKillTree(p.cmd)
 }
 
 // Controller wraps Android SDK discovery, pure-Go AVD creation, emulator process launching, and scrcpy.
@@ -128,19 +120,35 @@ type Controller struct {
 	adbServerPort   int
 }
 
-// DefaultDataDir returns the default unified VirDeckData directory next to the executable (or current working directory).
+// DefaultDataDir uses a portable VirDeckData directory, or the user's Application
+// Support directory for a macOS app bundle. VIRDECK_DATA_DIR overrides both.
 func DefaultDataDir() string {
-	v := strings.TrimSpace(os.Getenv("VIRDECK_DATA_DIR"))
+	home, _ := os.UserHomeDir()
+	base := exeBaseDir()
+	if strings.Contains(strings.ToLower(base), "go-build") || strings.Contains(strings.ToLower(base), "\\temp\\") {
+		if wd, err := os.Getwd(); err == nil {
+			base = wd
+		}
+	}
+	return defaultDataDirForHost(runtime.GOOS, base, home, os.Getenv("VIRDECK_DATA_DIR"))
+}
+
+func defaultDataDirForHost(host, base, home, override string) string {
+	v := strings.TrimSpace(override)
 	if v != "" {
 		if abs, err := filepath.Abs(v); err == nil {
 			return abs
 		}
 		return v
 	}
-	base := exeBaseDir()
-	if strings.Contains(strings.ToLower(base), "go-build") || strings.Contains(strings.ToLower(base), "\\temp\\") {
-		if wd, err := os.Getwd(); err == nil {
-			base = wd
+	if host == "darwin" && home != "" {
+		for path := filepath.Clean(base); ; path = filepath.Dir(path) {
+			if strings.HasSuffix(strings.ToLower(filepath.Base(path)), ".app") {
+				return filepath.Join(home, "Library", "Application Support", "VirDeck")
+			}
+			if filepath.Dir(path) == path {
+				break
+			}
 		}
 	}
 	return filepath.Join(base, "VirDeckData")
@@ -345,17 +353,9 @@ func discoverSDKRoot(dataDir string) string {
 			}
 		}
 	}
-	// 4. Check standard Windows user SDK installation paths.
-	var candidates []string
-	if localAppData := os.Getenv("LOCALAPPDATA"); localAppData != "" {
-		candidates = append(candidates, filepath.Join(localAppData, "Android", "Sdk"))
-	}
-	if home, err := os.UserHomeDir(); err == nil && home != "" {
-		candidates = append(candidates,
-			filepath.Join(home, "AppData", "Local", "Android", "Sdk"),
-			filepath.Join(home, "Android", "Sdk"),
-		)
-	}
+	// 4. Check standard host SDK installation paths.
+	home, _ := os.UserHomeDir()
+	candidates := hostSDKRoots(runtime.GOOS, home, os.Getenv("LOCALAPPDATA"))
 	for _, c := range candidates {
 		if info, err := os.Stat(c); err == nil && info.IsDir() {
 			return c
@@ -478,11 +478,26 @@ func (c *Controller) candidateSDKRoots() []string {
 		add(filepath.Join(c.dataDir, "sdk"))
 	}
 	add(c.sdkRoot)
-	if localAppData := os.Getenv("LOCALAPPDATA"); localAppData != "" {
-		add(filepath.Join(localAppData, "Android", "Sdk"))
+	home, _ := os.UserHomeDir()
+	for _, root := range hostSDKRoots(runtime.GOOS, home, os.Getenv("LOCALAPPDATA")) {
+		add(root)
 	}
-	if home, err := os.UserHomeDir(); err == nil && home != "" {
-		add(filepath.Join(home, "AppData", "Local", "Android", "Sdk"))
+	return roots
+}
+
+func hostSDKRoots(host, home, localAppData string) []string {
+	var roots []string
+	if host == "windows" && localAppData != "" {
+		roots = append(roots, filepath.Join(localAppData, "Android", "Sdk"))
+	}
+	if home != "" {
+		if host == "darwin" {
+			roots = append(roots, filepath.Join(home, "Library", "Android", "sdk"))
+		}
+		if host == "windows" {
+			roots = append(roots, filepath.Join(home, "AppData", "Local", "Android", "Sdk"))
+		}
+		roots = append(roots, filepath.Join(home, "Android", "Sdk"))
 	}
 	return roots
 }
@@ -534,6 +549,22 @@ func (c *Controller) InspectEnv(ctx context.Context) EnvInfo {
 		SystemImages:   c.ListSystemImages(),
 	}
 
+	// Give actionable host diagnostics before invoking the emulator, including
+	// installations where no emulator has been downloaded yet.
+	if runtime.GOOS == "darwin" || runtime.GOOS == "linux" {
+		var ok bool
+		var msg string
+		if runtime.GOOS == "darwin" {
+			out, err := exec.CommandContext(ctx, "/usr/sbin/sysctl", "-n", "kern.hv_support").CombinedOutput()
+			ok, msg = macHypervisorStatus(out, err)
+		} else {
+			ok, msg = checkKVMAccess("/dev/kvm")
+		}
+		status.AccelOK, status.AccelMessage = ok, msg
+		if !ok || emuBin == "" {
+			return status
+		}
+	}
 	if emuBin != "" {
 		cmd := exec.CommandContext(ctx, emuBin, "-accel-check")
 		cmd.Env = c.IsolatedEnv()
@@ -567,6 +598,29 @@ func (c *Controller) InspectEnv(ctx context.Context) EnvInfo {
 		status.AccelMessage = msg
 	}
 	return status
+}
+
+func macHypervisorStatus(out []byte, err error) (bool, string) {
+	if err == nil && strings.TrimSpace(string(out)) == "1" {
+		return true, "检测到 macOS Hypervisor.framework 可用"
+	}
+	msg := "未检测到可用的 macOS Hypervisor.framework，请确认 Mac 支持硬件虚拟化；虚拟机中运行时需由宿主开放嵌套虚拟化"
+	if err != nil {
+		msg += ": " + err.Error()
+	}
+	return false, msg
+}
+
+func checkKVMAccess(path string) (bool, string) {
+	f, err := os.OpenFile(path, os.O_RDWR, 0)
+	if err == nil {
+		_ = f.Close()
+		return true, "检测到 Linux KVM 可用，当前用户具备 /dev/kvm 读写权限"
+	}
+	if os.IsNotExist(err) {
+		return false, "未检测到 /dev/kvm，请启用 BIOS/UEFI 的 VT-x/AMD-V 并安装/加载 KVM 模块；虚拟机需开放嵌套虚拟化"
+	}
+	return false, "无法读写 /dev/kvm，请检查设备权限并将当前用户加入 kvm 用户组后重新登录: " + err.Error()
 }
 
 func checkWindowsHypervisorFallback(ctx context.Context) (bool, string) {
@@ -691,7 +745,7 @@ func (c *Controller) CloneAVD(srcName, dstName string) error {
 
 	// Write <dstName>.ini descriptor file.
 	iniPath := filepath.Join(c.avdHome, dstName+".ini")
-	iniContent := fmt.Sprintf("avd.ini.encoding=UTF-8\npath=%s\npath.rel=avd\\%s.avd\ntarget=android-34\n", dstDir, dstName)
+	iniContent := fmt.Sprintf("avd.ini.encoding=UTF-8\npath=%s\npath.rel=%s\ntarget=android-34\n", dstDir, filepath.Join("avd", dstName+".avd"))
 	if srcIni, err := os.ReadFile(filepath.Join(c.avdHome, srcName+".ini")); err == nil {
 		s := string(srcIni)
 		s = strings.ReplaceAll(s, srcDir, dstDir)

@@ -777,7 +777,17 @@ func (m *Manager) Shell(ctx context.Context, ids []string, cmd string) (map[stri
 }
 
 // OpenScreen opens an independent scrcpy window for a running instance.
-func (m *Manager) OpenScreen(ctx context.Context, id string) error {
+func (m *Manager) OpenScreen(ctx context.Context, id string) error { return m.openScreen(ctx, id, nil) }
+
+// OpenScreenAt uses client coordinates for a newly opened projection. Existing
+// windows retain their position, as with OpenScreen; explicit bounds bypass auto-fill.
+func (m *Manager) OpenScreenAt(ctx context.Context, id string, bounds screenlayout.Rect) error {
+	if bounds.Width <= 0 || bounds.Height <= 0 || bounds.Width > 32768 || bounds.Height > 32768 || bounds.X < -32768 || bounds.X > 32768 || bounds.Y < -32768 || bounds.Y > 32768 {
+		return errors.New("无效的投屏启动坐标或尺寸")
+	}
+	return m.openScreen(ctx, id, &bounds)
+}
+func (m *Manager) openScreen(ctx context.Context, id string, bounds *screenlayout.Rect) error {
 	inst, ok := m.registry.Get(id)
 	if !ok {
 		return fmt.Errorf("实例不存在: %s", id)
@@ -790,13 +800,24 @@ func (m *Manager) OpenScreen(ctx context.Context, id string) error {
 	if err != nil {
 		return err
 	}
-	created, err := m.emu.StartProjectionWithSettings(ctx, inst.ID, inst.Port, title, settings)
+	var created bool
+	if bounds != nil {
+		backend, ok := m.emu.(interface {
+			StartProjectionWithBounds(context.Context, string, int, string, emu.ProjectionSettings, screenlayout.Rect) (bool, error)
+		})
+		if !ok {
+			return errors.New("当前投屏后端不支持指定启动坐标")
+		}
+		created, err = backend.StartProjectionWithBounds(ctx, inst.ID, inst.Port, title, settings, *bounds)
+	} else {
+		created, err = m.emu.StartProjectionWithSettings(ctx, inst.ID, inst.Port, title, settings)
+	}
 	if err != nil {
 		m.emitLog(id, fmt.Sprintf("打开 %s 投屏失败: %v", inst.Name, err))
 		return err
 	}
 	m.emitLog(id, fmt.Sprintf("已拉起 %s 的 scrcpy 投屏窗口", inst.Name))
-	if created {
+	if created && bounds == nil {
 		return m.fillNewScreen(ctx, id)
 	}
 	return nil

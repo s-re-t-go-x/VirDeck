@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"runtime"
 )
 
 //go:embed defaults.json
@@ -39,6 +40,11 @@ type Sources struct {
 	PlayStoreXML  string `json:"playStoreXML"`
 	GoogleAPIsXML string `json:"googleAPIsXML"`
 	DefaultXML    string `json:"defaultXML"`
+	PlatformTools string `json:"platformTools"`
+	Scrcpy        string `json:"scrcpy"`
+}
+
+type ToolSources struct {
 	PlatformTools string `json:"platformTools"`
 	Scrcpy        string `json:"scrcpy"`
 }
@@ -112,14 +118,16 @@ func ValidateProjection(p ProjectionDefaults) error {
 }
 
 type Defaults struct {
-	ProjectionPresets []ProjectionPreset   `json:"projectionPresets"`
-	Projection        ProjectionDefaults   `json:"projection"`
-	ScreenLayout      ScreenLayoutDefaults `json:"screenLayout"`
-	CloneCount        int                  `json:"cloneCount"`
-	Create            CreateDefaults       `json:"create"`
-	Runtime           RuntimeDefaults      `json:"runtime"`
-	Sources           Sources              `json:"sources"`
-	Images            []ImagePreset        `json:"images"`
+	HostSources       map[string]ToolSources `json:"hostSources"`
+	ARMImages         []ImagePreset          `json:"armImages"`
+	ProjectionPresets []ProjectionPreset     `json:"projectionPresets"`
+	Projection        ProjectionDefaults     `json:"projection"`
+	ScreenLayout      ScreenLayoutDefaults   `json:"screenLayout"`
+	CloneCount        int                    `json:"cloneCount"`
+	Create            CreateDefaults         `json:"create"`
+	Runtime           RuntimeDefaults        `json:"runtime"`
+	Sources           Sources                `json:"sources"`
+	Images            []ImagePreset          `json:"images"`
 }
 
 func decode(raw []byte, d *Defaults) error {
@@ -176,7 +184,33 @@ func decode(raw []byte, d *Defaults) error {
 var Values, LoadError = initial()
 
 func initial() (Defaults, error) {
+	return ForHost(runtime.GOOS, runtime.GOARCH)
+}
+
+// ForHost decodes an independent copy of the shipped defaults for a host.
+func ForHost(goos, goarch string) (Defaults, error) {
 	var d Defaults
-	err := decode(builtin, &d)
-	return d, err
+	if err := decode(builtin, &d); err != nil {
+		return d, err
+	}
+	if tools, ok := d.HostSources[goos+"/"+goarch]; ok {
+		d.Sources.PlatformTools, d.Sources.Scrcpy = tools.PlatformTools, tools.Scrcpy
+	} else {
+		d.Sources.PlatformTools, d.Sources.Scrcpy = "", ""
+	}
+	if goarch == "arm64" {
+		d.Images = append([]ImagePreset(nil), d.ARMImages...)
+		if len(d.Images) > 0 {
+			d.Create.Image = d.Images[0].ID
+		}
+	} else if goos != "windows" {
+		var images []ImagePreset
+		for _, p := range d.Images {
+			if p.ABI == "x86_64" {
+				images = append(images, p)
+			}
+		}
+		d.Images = images
+	}
+	return d, nil
 }

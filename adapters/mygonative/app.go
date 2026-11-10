@@ -1743,8 +1743,8 @@ func (vm *viewModel) buildEnvChecksList(c *ui.Context, checks []envCheck) {
 						go func() {
 							paths, err := mygo.Dialog.Open(mygo.OpenDialogOptions{
 								Parent:  vm.win,
-								Title:   fmt.Sprintf("选择 %s 的离线 .zip 压缩包", toolKey),
-								Filters: []mygo.FileFilter{{Name: "Zip Archive (*.zip)", Extensions: []string{"zip"}}},
+								Title:   fmt.Sprintf("选择 %s 的离线压缩包", toolKey),
+								Filters: []mygo.FileFilter{{Name: "Archive (*.zip, *.tar.gz, *.tgz)", Extensions: []string{"zip", "tar.gz", "tgz", "gz"}}},
 							})
 							if err != nil || len(paths) == 0 {
 								return

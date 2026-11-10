@@ -4,11 +4,12 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"virdeck/config"
 )
 
 func TestCatalogRecommendedCustomAndLocalMerge(t *testing.T) {
 	tmp := t.TempDir()
-	store, err := NewStore(filepath.Join(tmp, "images_catalog.json"), filepath.Join(tmp, "sdk"))
+	store, err := windowsStore(filepath.Join(tmp, "images_catalog.json"), filepath.Join(tmp, "sdk"))
 	if err != nil {
 		t.Fatalf("NewStore: %v", err)
 	}
@@ -19,7 +20,7 @@ func TestCatalogRecommendedCustomAndLocalMerge(t *testing.T) {
 		"system-images;android-37.0;google_apis_playstore_ps16k;x86_64",
 	}
 	list := store.List(installed)
-	if len(list) != len(BuiltinRecommended())+1 {
+	if len(list) != len(windowsRecommended())+1 {
 		t.Fatalf("expected presets plus one local image, got %d", len(list))
 	}
 	play14, _ := store.Get(installed[0], installed)
@@ -42,7 +43,7 @@ func TestCatalogRecommendedCustomAndLocalMerge(t *testing.T) {
 		t.Fatalf("SaveCustom: %v", err)
 	}
 
-	reloaded, err := NewStore(filepath.Join(tmp, "images_catalog.json"), filepath.Join(tmp, "sdk"))
+	reloaded, err := windowsStore(filepath.Join(tmp, "images_catalog.json"), filepath.Join(tmp, "sdk"))
 	if err != nil {
 		t.Fatalf("reload NewStore: %v", err)
 	}
@@ -61,7 +62,7 @@ func TestCatalogRecommendedCustomAndLocalMerge(t *testing.T) {
 
 func TestFavoritesPersistAndSortBeforePresets(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "catalog.json")
-	s, _ := NewStore(path, "")
+	s, _ := windowsStore(path, "")
 	id := "system-images;android-35;default;x86_64"
 	if err := s.SaveCustom(ImageItem{ID: id, Name: "Android 15"}); err != nil {
 		t.Fatal(err)
@@ -69,7 +70,7 @@ func TestFavoritesPersistAndSortBeforePresets(t *testing.T) {
 	if err := s.SetFavorite(id, true, "  测试账号  "); err != nil {
 		t.Fatal(err)
 	}
-	reloaded, _ := NewStore(path, "")
+	reloaded, _ := windowsStore(path, "")
 	list := reloaded.List(nil)
 	found := false
 	nonFavoriteSeen := false
@@ -89,7 +90,7 @@ func TestFavoritesPersistAndSortBeforePresets(t *testing.T) {
 	if err := reloaded.SetFavorite(id, false, ""); err != nil {
 		t.Fatal(err)
 	}
-	again, _ := NewStore(path, "")
+	again, _ := windowsStore(path, "")
 	item, _ := again.Get(id, nil)
 	if item.Favorite || item.Note != "" {
 		t.Fatalf("unfavorite not persisted: %+v", item)
@@ -97,14 +98,14 @@ func TestFavoritesPersistAndSortBeforePresets(t *testing.T) {
 }
 
 func TestCatalogHidesCachedPrereleasesAndAddsVersion(t *testing.T) {
-	s, _ := NewStore("", "")
+	s, _ := windowsStore("", "")
 	s.data.Official = []ImageItem{
 		{ID: "system-images;android-35;google_apis;x86_64", APILevel: "35", TagID: "google_apis", Name: "Android API 35 · Google APIs"},
 		{ID: "system-images;android-36;google_apis;x86_64", Name: "Android 16 Beta"},
 		{ID: "system-images;android-canary-20261104;google_apis;x86_64", Name: "Android API canary-20261104"},
 	}
 	list := s.List(nil)
-	if len(list) != len(BuiltinRecommended())+1 {
+	if len(list) != len(windowsRecommended())+1 {
 		t.Fatalf("prerelease leaked: %+v", list)
 	}
 	item, _ := s.Get("system-images;android-35;google_apis;x86_64", nil)
@@ -114,7 +115,7 @@ func TestCatalogHidesCachedPrereleasesAndAddsVersion(t *testing.T) {
 }
 
 func TestCachedBetaCannotReplaceStablePresetDownload(t *testing.T) {
-	s, _ := NewStore("", "")
+	s, _ := windowsStore("", "")
 	id := "system-images;android-34;google_apis_playstore;x86_64"
 	s.data.Official = []ImageItem{{ID: id, Name: "Android 14 Beta", URL: "https://example.com/beta.zip"}}
 	item, ok := s.Get(id, nil)
@@ -125,7 +126,7 @@ func TestCachedBetaCannotReplaceStablePresetDownload(t *testing.T) {
 
 func TestDefaultFavoriteCanBeClearedPermanently(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "catalog.json")
-	s, err := NewStore(path, "")
+	s, err := windowsStore(path, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -137,7 +138,7 @@ func TestDefaultFavoriteCanBeClearedPermanently(t *testing.T) {
 	if err := s.SetFavorite(id, false, ""); err != nil {
 		t.Fatal(err)
 	}
-	again, err := NewStore(path, "")
+	again, err := windowsStore(path, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -148,7 +149,7 @@ func TestDefaultFavoriteCanBeClearedPermanently(t *testing.T) {
 }
 
 func TestNewCatalogSeedsCompatibilityFavoritesWithVerifiedLegacyDownload(t *testing.T) {
-	store, err := NewStore(filepath.Join(t.TempDir(), "catalog.json"), "")
+	store, err := windowsStore(filepath.Join(t.TempDir(), "catalog.json"), "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -173,7 +174,7 @@ func TestLegacyCatalogAddsNewFavoritesWithoutReplacingNotes(t *testing.T) {
 	if err := os.WriteFile(path, []byte(raw), 0600); err != nil {
 		t.Fatal(err)
 	}
-	s, err := NewStore(path, "")
+	s, err := windowsStore(path, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -194,7 +195,7 @@ func TestLegacyUnfavoriteAndPostMigrationEditsSurviveReload(t *testing.T) {
 	if err := os.WriteFile(path, []byte(`{"favorites":{}}`), 0600); err != nil {
 		t.Fatal(err)
 	}
-	s, err := NewStore(path, "")
+	s, err := windowsStore(path, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -213,7 +214,7 @@ func TestLegacyUnfavoriteAndPostMigrationEditsSurviveReload(t *testing.T) {
 	if err := s.SetFavorite(noteID, true, ""); err != nil {
 		t.Fatal(err)
 	}
-	again, err := NewStore(path, "")
+	again, err := windowsStore(path, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -226,4 +227,14 @@ func TestLegacyUnfavoriteAndPostMigrationEditsSurviveReload(t *testing.T) {
 	if item, _ := again.Get(oldID, nil); item.Favorite {
 		t.Fatal("legacy default resurrected on reload")
 	}
+}
+
+// Existing fixtures exercise the shipped Windows presets and their migrations
+// on every test host; ARM behavior has separate explicit-host fixtures.
+func windowsStore(filePath, sdkRoot string) (*Store, error) {
+	return NewStoreForHost(filePath, sdkRoot, "windows", "amd64")
+}
+func windowsRecommended() []ImageItem {
+	d, _ := config.ForHost("windows", "amd64")
+	return recommended(d)
 }

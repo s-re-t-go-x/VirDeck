@@ -2,6 +2,7 @@ package mygonative
 
 import (
 	"fmt"
+	"runtime"
 	"strings"
 
 	"virdeck/core/service"
@@ -19,6 +20,10 @@ type envCheck struct {
 }
 
 func buildEnvChecks(env service.EnvStatus) []envCheck {
+	return buildEnvChecksForHost(env, runtime.GOOS)
+}
+
+func buildEnvChecksForHost(env service.EnvStatus, host string) []envCheck {
 	tool := func(name, path, impact, fix string, blocking bool, toolKey string) envCheck {
 		c := envCheck{
 			name:     name,
@@ -46,11 +51,11 @@ func buildEnvChecks(env service.EnvStatus) []envCheck {
 			`点击右侧「一键下载」自动获取官方 platform-tools，或点击「导入 .zip」离线安装。`, true, "adb"),
 		tool("scrcpy（投屏）", env.ScrcpyPath,
 			"无法打开实例画面，其他功能不受影响。",
-			"点击右侧「一键下载」自动获取 scrcpy-win64，或点击「导入 .zip」解压至 VirDeckData/scrcpy。", false, "scrcpy"),
+			"点击右侧「一键下载」获取当前平台的 scrcpy，或导入对应平台安装包。", false, "scrcpy"),
 	}
 
 	// Path & permission self-check (ASCII path & writable VirDeckData).
-	pathOK := (env.DataDir != "" && env.PathASCIIOK && env.PathWritableOK) ||
+	pathOK := (env.DataDir != "" && (host != "windows" || env.PathASCIIOK) && env.PathWritableOK) ||
 		(env.DataDir == "" && strings.TrimSpace(env.SDKRoot) != "" && env.PathWarning == "")
 	pathDetail := env.DataDir
 	if strings.TrimSpace(pathDetail) == "" {
@@ -71,6 +76,10 @@ func buildEnvChecks(env service.EnvStatus) []envCheck {
 			pathCheck.impact = "Google 官方模拟器底层不支持含中文/非 ASCII 字符或无写入权限的目录。"
 		}
 		pathCheck.fix = "请将 VirDeck 放置在纯英文/数字且有读写权限的路径下（如 D:\\VirDeck）。"
+		if host != "windows" {
+			pathCheck.impact = "数据目录不可写，无法保存设置和实例数据。"
+			pathCheck.fix = "请选择当前用户可读写的数据目录，或通过 VIRDECK_DATA_DIR 指定位置。"
+		}
 	}
 	checks = append(checks, pathCheck)
 
@@ -84,6 +93,18 @@ func buildEnvChecks(env service.EnvStatus) []envCheck {
 	if !accel.ok {
 		accel.impact = "模拟器会极度卡顿，甚至无法启动。"
 		accel.fix = "在「启用或关闭 Windows 功能」中勾选「Windows 虚拟机监控程序平台」，确定后重启电脑。"
+	}
+	switch host {
+	case "darwin":
+		accel.name = "硬件加速 (Hypervisor.framework)"
+		if !accel.ok {
+			accel.fix = "确认 macOS 支持硬件虚拟化，使用与 Mac 芯片匹配的模拟器和系统镜像；虚拟机内运行时需要宿主支持嵌套虚拟化。"
+		}
+	case "linux":
+		accel.name = "硬件加速 (KVM)"
+		if !accel.ok {
+			accel.fix = "启用 BIOS/UEFI 虚拟化及 KVM 模块，检查 /dev/kvm 的读写权限，并将当前用户加入 kvm 组后重新登录。"
+		}
 	}
 	checks = append(checks, accel)
 

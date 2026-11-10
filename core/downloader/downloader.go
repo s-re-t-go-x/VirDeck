@@ -1,7 +1,9 @@
 package downloader
 
 import (
+	"archive/tar"
 	"archive/zip"
+	"compress/gzip"
 	"context"
 	"crypto/sha1"
 	"encoding/hex"
@@ -9,11 +11,15 @@ import (
 	"encoding/xml"
 	"errors"
 	"fmt"
+	"golang.org/x/text/cases"
+	"golang.org/x/text/unicode/norm"
 	"io"
 	"net/http"
 	"net/url"
 	"os"
+	"path"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -368,6 +374,10 @@ func ExtractZipAtomically(ctx context.Context, zipPath, destDir string, onProgre
 	}()
 
 	stripPrefix := detectSingleRootPrefix(r.File)
+	entries, err := validateZipEntries(r.File, stripPrefix)
+	if err != nil {
+		return err
+	}
 	cleanTmpRoot := filepath.Clean(tmpDir) + string(os.PathSeparator)
 
 	totalFiles := len(r.File)
@@ -378,11 +388,7 @@ func ExtractZipAtomically(ctx context.Context, zipPath, destDir string, onProgre
 		default:
 		}
 
-		relName := strings.TrimPrefix(filepath.ToSlash(f.Name), "/")
-		if stripPrefix != "" {
-			relName = strings.TrimPrefix(relName, stripPrefix)
-		}
-		relName = strings.TrimPrefix(relName, "/")
+		relName := entries[f]
 		if relName == "" {
 			continue
 		}
@@ -441,6 +447,70 @@ func ExtractZipAtomically(ctx context.Context, zipPath, destDir string, onProgre
 	return nil
 }
 
+func ExtractArchiveAtomically(ctx context.Context, archivePath, destDir string, onProgress ProgressFunc, targetID, name string) error {
+	if !strings.HasSuffix(strings.ToLower(archivePath), ".tar.gz") && !strings.HasSuffix(strings.ToLower(archivePath), ".tgz") {
+		return ExtractZipAtomically(ctx, archivePath, destDir, onProgress, targetID, name)
+	}
+	// Normalize tar entries into ZIP metadata, sharing one security preflight
+	// and atomic installation path for both official distribution formats.
+	f, err := os.Open(archivePath)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	gz, err := gzip.NewReader(f)
+	if err != nil {
+		return err
+	}
+	defer gz.Close()
+	tmp, err := os.CreateTemp("", "virdeck-archive-*.zip")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(tmp.Name())
+	defer tmp.Close()
+	zw := zip.NewWriter(tmp)
+	tr := tar.NewReader(gz)
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		h, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return err
+		}
+		zh := &zip.FileHeader{Name: h.Name, Method: zip.Deflate}
+		zh.SetMode(h.FileInfo().Mode())
+		switch h.Typeflag {
+		case tar.TypeReg, tar.TypeRegA, tar.TypeDir, tar.TypeSymlink:
+		default:
+			return fmt.Errorf("不支持的 tar 条目: %s", h.Name)
+		}
+		out, err := zw.CreateHeader(zh)
+		if err != nil {
+			return err
+		}
+		if h.Typeflag == tar.TypeSymlink {
+			_, err = io.WriteString(out, h.Linkname)
+		} else {
+			_, err = io.Copy(out, tr)
+		}
+		if err != nil {
+			return err
+		}
+	}
+	if err = zw.Close(); err != nil {
+		return err
+	}
+	if err = tmp.Close(); err != nil {
+		return err
+	}
+	return ExtractZipAtomically(ctx, tmp.Name(), destDir, onProgress, targetID, name)
+}
+
 func extractSingleZipEntry(f *zip.File, dstPath string) error {
 	rc, err := f.Open()
 	if err != nil {
@@ -449,6 +519,14 @@ func extractSingleZipEntry(f *zip.File, dstPath string) error {
 	defer rc.Close()
 
 	mode := f.Mode()
+	if mode&os.ModeSymlink != 0 {
+		target, err := io.ReadAll(io.LimitReader(rc, 64*1024+1))
+		if err != nil {
+			return err
+		}
+		return os.Symlink(string(target), dstPath)
+	}
+	mode = mode.Perm()
 	if mode == 0 {
 		mode = 0o644
 	}
@@ -458,9 +536,119 @@ func extractSingleZipEntry(f *zip.File, dstPath string) error {
 	}
 	defer out.Close()
 
-	_, err = io.Copy(out, rc)
-	return err
+	if _, err = io.Copy(out, rc); err != nil {
+		return err
+	}
+	// Explicit chmod preserves executable bits even with a restrictive umask.
+	return out.Chmod(mode)
 }
+
+// Validate the complete entry graph before writing anything: archive order must
+// never allow a file to be written through a link, or a later link to replace a
+// previously populated directory. Framework links may point through other links.
+func validateZipEntries(files []*zip.File, prefix string) (map[*zip.File]string, error) {
+	entries := make(map[*zip.File]string, len(files))
+	links := make(map[string]string)
+	seen := make(map[string]bool)
+	for _, f := range files {
+		name := strings.ReplaceAll(f.Name, "\\", "/")
+		if !safeArchivePath(name) {
+			return nil, fmt.Errorf("压缩包包含非法路径: %s", f.Name)
+		}
+		rel := strings.TrimSuffix(strings.TrimPrefix(name, prefix), "/")
+		if rel == "" {
+			continue
+		}
+		key := archivePathKey(rel)
+		if seen[key] {
+			return nil, fmt.Errorf("压缩包包含重复路径: %s", rel)
+		}
+		seen[key] = true
+		entries[f] = rel
+		if f.Mode()&os.ModeSymlink != 0 {
+			r, err := f.Open()
+			if err != nil {
+				return nil, err
+			}
+			data, err := io.ReadAll(io.LimitReader(r, 64*1024+1))
+			r.Close()
+			if err != nil {
+				return nil, err
+			}
+			target := string(data)
+			if len(data) > 64*1024 || target == "" || strings.ContainsAny(target, "\\\x00:") || path.IsAbs(target) {
+				return nil, fmt.Errorf("非法符号链接: %s", rel)
+			}
+			links[key] = target
+		} else if !f.Mode().IsRegular() && !f.FileInfo().IsDir() {
+			return nil, fmt.Errorf("不支持的压缩包条目: %s", rel)
+		}
+	}
+	for _, rel := range entries {
+		for parent := path.Dir(rel); parent != "."; parent = path.Dir(parent) {
+			if _, ok := links[archivePathKey(parent)]; ok {
+				return nil, fmt.Errorf("压缩包路径穿过符号链接: %s", rel)
+			}
+		}
+	}
+	for rel, target := range links {
+		if err := validateLinkTarget(path.Dir(rel)+"/"+target, links, map[string]bool{rel: true}); err != nil {
+			return nil, fmt.Errorf("非法符号链接 %s: %w", rel, err)
+		}
+	}
+	return entries, nil
+}
+
+func safeArchivePath(name string) bool {
+	trimmed := strings.TrimSuffix(name, "/")
+	if trimmed == "" || strings.HasPrefix(name, "/") || strings.ContainsAny(name, "\x00:") {
+		return false
+	}
+	for _, segment := range strings.Split(trimmed, "/") {
+		if segment == "" || segment == ".." || segment == "." || strings.TrimRight(segment, ". ") != segment {
+			return false
+		}
+	}
+	return true
+}
+
+func validateLinkTarget(target string, links map[string]string, visiting map[string]bool) error {
+	if path.IsAbs(target) {
+		return errors.New("链接目标越界")
+	}
+	parts := strings.Split(target, "/")
+	var resolvedParts []string
+	for i := range parts {
+		if parts[i] == "." || parts[i] == "" {
+			continue
+		}
+		if parts[i] == ".." {
+			if len(resolvedParts) == 0 {
+				return errors.New("链接目标越界")
+			}
+			resolvedParts = resolvedParts[:len(resolvedParts)-1]
+			continue
+		}
+		if strings.TrimRight(parts[i], ". ") != parts[i] {
+			return errors.New("链接目标越界")
+		}
+		resolvedParts = append(resolvedParts, parts[i])
+		candidate := archivePathKey(strings.Join(resolvedParts, "/"))
+		if next, ok := links[candidate]; ok {
+			if visiting[candidate] {
+				return errors.New("循环符号链接")
+			}
+			visiting[candidate] = true
+			resolved := path.Dir(candidate) + "/" + next + "/" + strings.Join(parts[i+1:], "/")
+			return validateLinkTarget(resolved, links, visiting)
+		}
+	}
+	return nil
+}
+
+// APFS/HFS+ commonly compare names without case or Unicode normalization.
+// Apply the conservative identity on every host, so validation is portable.
+func archivePathKey(name string) string { return norm.NFD.String(cases.Fold().String(name)) }
 
 func detectSingleRootPrefix(files []*zip.File) string {
 	var root string
@@ -486,8 +674,13 @@ func detectSingleRootPrefix(files []*zip.File) string {
 	return root
 }
 
-// FetchRepositoryPackages parses an official Android SDK repository2 / sys-img2 XML URL and returns Windows (or OS-agnostic) packages.
+// FetchRepositoryPackages resolves official repository packages for the current host.
 func (c *Client) FetchRepositoryPackages(ctx context.Context, xmlURL string) ([]RemoteArchive, error) {
+	return c.FetchRepositoryPackagesForHost(ctx, xmlURL, runtime.GOOS, runtime.GOARCH)
+}
+
+// FetchRepositoryPackagesForHost resolves packages for an explicitly selected host.
+func (c *Client) FetchRepositoryPackagesForHost(ctx context.Context, xmlURL, goos, goarch string) ([]RemoteArchive, error) {
 	hc, err := c.httpClient(25 * time.Second)
 	if err != nil {
 		return nil, err
@@ -509,7 +702,7 @@ func (c *Client) FetchRepositoryPackages(ctx context.Context, xmlURL string) ([]
 		return nil, err
 	}
 	baseURL := xmlURL[:strings.LastIndex(xmlURL, "/")+1]
-	return ParseRepositoryXML(data, baseURL)
+	return ParseRepositoryXMLForHost(data, baseURL, goos, goarch)
 }
 
 type xmlRepository struct {
@@ -549,6 +742,7 @@ type xmlTag struct {
 }
 
 type xmlArchive struct {
+	HostArch string      `xml:"host-arch"`
 	HostOS   string      `xml:"host-os"`
 	HostBits string      `xml:"host-bits"`
 	Complete xmlComplete `xml:"complete"`
@@ -562,6 +756,12 @@ type xmlComplete struct {
 
 // ParseRepositoryXML parses Android SDK repository2-3.xml / sys-img2-3.xml bytes and resolves archive URLs against baseURL.
 func ParseRepositoryXML(data []byte, baseURL string) ([]RemoteArchive, error) {
+	return ParseRepositoryXMLForHost(data, baseURL, runtime.GOOS, runtime.GOARCH)
+}
+
+// ParseRepositoryXMLForHost matches host OS, bitness and architecture, preferring
+// exact host archives over OS-independent archives.
+func ParseRepositoryXMLForHost(data []byte, baseURL, goos, goarch string) ([]RemoteArchive, error) {
 	var repo xmlRepository
 	if err := xml.Unmarshal(data, &repo); err != nil {
 		return nil, fmt.Errorf("解析 Android SDK XML 索引失败: %w", err)
@@ -576,16 +776,11 @@ func ParseRepositoryXML(data []byte, baseURL string) ([]RemoteArchive, error) {
 			continue
 		}
 		var chosen *xmlArchive
+		bestScore := -1
 		for i := range pkg.Archives {
 			a := &pkg.Archives[i]
-			host := strings.ToLower(strings.TrimSpace(a.HostOS))
-			bits := strings.TrimSpace(a.HostBits)
-			if host == "windows" && (bits == "" || bits == "64") {
-				chosen = a
-				break
-			}
-			if host == "" && chosen == nil {
-				chosen = a
+			if score := archiveHostScore(*a, pkg.Path, goos, goarch); score > bestScore {
+				chosen, bestScore = a, score
 			}
 		}
 		if chosen == nil || strings.TrimSpace(chosen.Complete.URL) == "" {
@@ -617,6 +812,45 @@ func ParseRepositoryXML(data []byte, baseURL string) ([]RemoteArchive, error) {
 		})
 	}
 	return results, nil
+}
+
+func archiveHostScore(a xmlArchive, pkg, goos, goarch string) int {
+	host := strings.ToLower(strings.TrimSpace(a.HostOS))
+	if goos == "darwin" {
+		goos = "macosx"
+	}
+	if host != "" && host != goos {
+		return -1
+	}
+	bits := strings.TrimSpace(a.HostBits)
+	if bits != "" && bits != "64" {
+		return -1
+	}
+	arch := strings.ToLower(strings.TrimSpace(a.HostArch))
+	switch arch {
+	case "x64", "x86_64":
+		arch = "amd64"
+	case "aarch64":
+		arch = "arm64"
+	}
+	if arch != "" && arch != goarch {
+		return -1
+	}
+	if arch == "" && host != "" && !strings.HasPrefix(pkg, "system-images;") {
+		// SDK archives without host-arch are historically x64, except the
+		// universal macOS platform-tools distribution. Never assume Linux ARM.
+		if goarch != "amd64" && !(goarch == "arm64" && host == "macosx" && pkg == "platform-tools") {
+			return -1
+		}
+	}
+	score := 0
+	if host != "" {
+		score += 2
+	}
+	if arch != "" {
+		score += 1
+	}
+	return score
 }
 
 func loadPartMeta(path string) partMeta {

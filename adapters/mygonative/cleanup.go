@@ -46,7 +46,7 @@ func (vm *viewModel) buildCleanupTab(c *ui.Context) {
 				ui.Text(c, detail).FontSize(11).TextColor(t.TextMuted)
 			})
 		}
-		row("clean_downloads", "下载压缩包", "删除 downloads 内已完成的 .zip；重新安装时需重新下载。", &vm.cleanupDownloads, vm.cleanupReport.Downloads, false)
+		row("clean_downloads", "下载压缩包", "删除 downloads 内已完成的压缩包（.zip / .tar.gz）；重新安装时需重新下载。", &vm.cleanupDownloads, vm.cleanupReport.Downloads, false)
 		row("clean_partials", "未完成下载", "删除 .part / .meta；下次下载将从头开始。", &vm.cleanupPartials, vm.cleanupReport.Partials, false)
 		detail := "仅清理 cache.img 缓存分区及其差分文件，启动时重新生成。"
 		if vm.cleanupReport.AVDBlocked {

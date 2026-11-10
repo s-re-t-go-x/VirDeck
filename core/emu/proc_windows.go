@@ -4,6 +4,7 @@ package emu
 
 import (
 	"os/exec"
+	"strconv"
 	"syscall"
 )
 
@@ -15,6 +16,15 @@ func hideConsole(cmd *exec.Cmd) {
 		HideWindow:    true,
 		CreationFlags: createNoWindow,
 	}
+}
+
+func forceKillTree(cmd *exec.Cmd) error {
+	killCmd := exec.Command("taskkill", "/F", "/T", "/PID", strconv.Itoa(cmd.Process.Pid))
+	hideConsole(killCmd)
+	if err := killCmd.Run(); err == nil {
+		return nil
+	}
+	return cmd.Process.Kill()
 }
 
 // hideConsoleKeepGUI suppresses the attached console box without setting SW_HIDE on GUI windows (scrcpy, windowed emulator).

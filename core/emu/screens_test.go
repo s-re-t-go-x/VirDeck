@@ -14,6 +14,7 @@ import (
 )
 
 type screenLaunch struct {
+	Args  []string
 	PID   int
 	Title string
 }
@@ -28,7 +29,7 @@ func init() {
 			title = os.Args[i+1]
 		}
 	}
-	raw, _ := json.Marshal(screenLaunch{PID: os.Getpid(), Title: title})
+	raw, _ := json.Marshal(screenLaunch{PID: os.Getpid(), Title: title, Args: os.Args[1:]})
 	file, err := os.OpenFile(os.Getenv("VIRDECK_SCREEN_LAUNCHES"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
 	if err != nil {
 		os.Exit(2)

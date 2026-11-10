@@ -58,7 +58,7 @@ func (c *Controller) RestartProjection(ctx context.Context, id string, port int,
 		process.intentional = true
 	}
 	c.screenMu.Unlock()
-	if previous != nil {
+	if previous != nil && previous.Handle != 0 {
 		closer, ok := c.projectionHost().(interface {
 			close(screenlayout.Window) error
 		})
@@ -79,7 +79,7 @@ func (c *Controller) RestartProjection(ctx context.Context, id string, port int,
 			return errors.New("旧投屏尚未退出，请稍后重试")
 		}
 	}
-	if previous != nil {
+	if previous != nil && previous.Handle != 0 {
 		closeCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
 		defer cancel()
 		for {
@@ -104,10 +104,17 @@ func (c *Controller) RestartProjection(ctx context.Context, id string, port int,
 			}
 		}
 	}
-	if _, err := c.startProjectionWithSettings(ctx, id, port, title, settings); err != nil {
+	var initial *screenlayout.Rect
+	if previous != nil && previous.ClientWidth > 0 && previous.ClientHeight > 0 {
+		r := previous.Bounds
+		r.Width = previous.ClientWidth
+		r.Height = previous.ClientHeight
+		initial = &r
+	}
+	if _, err := c.startProjectionAt(ctx, id, port, title, settings, initial); err != nil {
 		return err
 	}
-	if previous != nil {
+	if previous != nil && previous.Handle != 0 {
 		current, err := c.ScrcpyWindows()
 		if err != nil {
 			return err

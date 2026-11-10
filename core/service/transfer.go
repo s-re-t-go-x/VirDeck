@@ -98,7 +98,7 @@ func (m *Manager) ReceiveFiles(ctx context.Context, id, remotePath, localDir str
 		return "", errors.New("当前 ADB 后端不支持文件传输")
 	}
 	if localDir == "" {
-		return "", errors.New("请选择 Windows 接收目录")
+		return "", errors.New("请选择电脑接收目录")
 	}
 	localDir, err = filepath.Abs(localDir)
 	if err != nil {

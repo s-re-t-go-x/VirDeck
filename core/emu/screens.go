@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -71,6 +72,8 @@ type projectionProcess struct {
 	port        int
 	err         error
 	output      projectionOutput
+	bounds      *screenlayout.Rect
+	title       string
 }
 type ProjectionWindow struct {
 	InstanceID string
@@ -104,7 +107,13 @@ func projectionPath(path string) string {
 	return filepath.Clean(path)
 }
 func ownedProjection(w screenlayout.Window, exe string) bool {
-	return w.PID > 0 && w.Handle != 0 && w.Executable != "" && strings.EqualFold(projectionPath(w.Executable), exe)
+	return w.PID > 0 && w.Handle != 0 && w.Executable != "" && sameProjectionExecutable(projectionPath(w.Executable), exe)
+}
+func sameProjectionExecutable(a, b string) bool {
+	if runtime.GOOS == "windows" {
+		return strings.EqualFold(a, b)
+	}
+	return a == b
 }
 func (c *Controller) scrcpyExecutable() (string, error) {
 	_, _, _, _, bin := c.ResolvePaths()
@@ -137,9 +146,12 @@ func (c *Controller) StartProjectionWithSettings(ctx context.Context, id string,
 	lock := c.projectionLock(id)
 	lock.Lock()
 	defer lock.Unlock()
-	return c.startProjectionWithSettings(ctx, id, port, title, settings)
+	return c.startProjectionAt(ctx, id, port, title, settings, nil)
 }
 func (c *Controller) startProjectionWithSettings(ctx context.Context, id string, port int, title string, settings ProjectionSettings) (bool, error) {
+	return c.startProjectionAt(ctx, id, port, title, settings, nil)
+}
+func (c *Controller) startProjectionAt(ctx context.Context, id string, port int, title string, settings ProjectionSettings, bounds *screenlayout.Rect) (bool, error) {
 	if err := config.ValidateProjection(settings); err != nil {
 		return false, err
 	}
@@ -155,7 +167,8 @@ func (c *Controller) startProjectionWithSettings(ctx context.Context, id string,
 	}
 	host := c.projectionHost()
 	windows, err := host.windows()
-	if err != nil {
+	portable := errors.Is(err, screenlayout.ErrUnsupported)
+	if err != nil && !portable {
 		return false, err
 	}
 	desired := projectionTitle(id, title)
@@ -195,7 +208,7 @@ func (c *Controller) startProjectionWithSettings(ctx context.Context, id string,
 		_ = p.cmd.Process.Kill()
 		select {
 		case <-p.done:
-			return c.startProjectionWithSettings(ctx, id, port, title, settings)
+			return c.startProjectionAt(ctx, id, port, title, settings, bounds)
 		case <-ctx.Done():
 			return false, ctx.Err()
 		case <-time.After(time.Second):
@@ -209,6 +222,14 @@ func (c *Controller) startProjectionWithSettings(ctx context.Context, id string,
 	if p == nil {
 		args := []string{"-s", fmt.Sprintf("emulator-%d", port), "--window-title", desired}
 		args = append(args, projectionSettingsArgs(settings)...)
+		if bounds != nil {
+			geometry, err := projectionBoundsArgs(*bounds)
+			if err != nil {
+				c.screenMu.Unlock()
+				return false, err
+			}
+			args = append(args, geometry...)
+		}
 		cmd := exec.Command(exe, args...)
 		cmd.Env = c.IsolatedEnv()
 		_, adbBin, _, _, _ := c.ResolvePaths()
@@ -217,7 +238,7 @@ func (c *Controller) startProjectionWithSettings(ctx context.Context, id string,
 		}
 		cmd.WaitDelay = time.Second
 		hideConsoleKeepGUI(cmd)
-		p = &projectionProcess{cmd: cmd, done: make(chan struct{}), port: port}
+		p = &projectionProcess{cmd: cmd, done: make(chan struct{}), port: port, bounds: bounds, title: desired}
 		cmd.Stdout = &p.output
 		cmd.Stderr = &p.output
 		if err := cmd.Start(); err != nil {
@@ -242,6 +263,17 @@ func (c *Controller) startProjectionWithSettings(ctx context.Context, id string,
 		}(p)
 	}
 	c.screenMu.Unlock()
+	if portable {
+		// Only process startup can be observed without a native window backend.
+		select {
+		case <-p.done:
+			return false, fmt.Errorf("投屏进程已退出: %v %s", p.err, p.output.text())
+		case <-ctx.Done():
+			return false, ctx.Err()
+		case <-time.After(200 * time.Millisecond):
+			return fresh, nil
+		}
+	}
 	waitCtx, cancel := context.WithTimeout(ctx, time.Duration(config.Values.ScreenLayout.WindowTimeoutSeconds)*time.Second)
 	defer cancel()
 	ticker := time.NewTicker(80 * time.Millisecond)
@@ -278,6 +310,9 @@ func (c *Controller) scrcpyWindows() ([]ProjectionWindow, error) {
 		return nil, err
 	}
 	windows, err := c.projectionHost().windows()
+	if errors.Is(err, screenlayout.ErrUnsupported) {
+		return c.trackedProjections(), nil
+	}
 	if err != nil {
 		return nil, err
 	}

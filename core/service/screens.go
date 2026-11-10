@@ -8,6 +8,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"strings"
 	"virdeck/config"
 	"virdeck/core/emu"
 	"virdeck/core/screenlayout"
@@ -67,7 +68,9 @@ func (m *Manager) InspectScreenLayout(ctx context.Context) (ScreenLayoutSnapshot
 	}
 	var err error
 	snap.Displays, err = m.emu.ScrcpyDisplays()
-	if err != nil {
+	if errors.Is(err, screenlayout.ErrUnsupported) {
+		snap.Warning = err.Error()
+	} else if err != nil {
 		return snap, err
 	}
 	open, err := m.emu.ScrcpyWindows()
@@ -92,7 +95,7 @@ func (m *Manager) InspectScreenLayout(ctx context.Context) (ScreenLayoutSnapshot
 	}
 	records, err := m.readScreenLayout()
 	if err != nil {
-		snap.Warning = "读取已保存布局失败：" + err.Error()
+		snap.Warning = strings.TrimSpace(snap.Warning + "\n读取已保存布局失败：" + err.Error())
 	} else {
 		snap.SavedCount = len(records)
 	}

@@ -1,13 +1,9 @@
-//go:build !windows
+//go:build !windows && !darwin
 
 package screenlayout
 
-import "errors"
-
-var errUnsupported = errors.New("native screen layout is only supported on Windows")
-
-func Displays() ([]Display, error)               { return nil, errUnsupported }
-func Windows() ([]Window, error)                 { return nil, errUnsupported }
-func Place(window Window, bounds Rect) error     { return errUnsupported }
-func Activate(window Window) error               { return errUnsupported }
-func SetTitle(window Window, title string) error { return errUnsupported }
+func Displays() ([]Display, error)  { return nil, ErrUnsupported }
+func Windows() ([]Window, error)    { return nil, ErrUnsupported }
+func Place(Window, Rect) error      { return ErrUnsupported }
+func Activate(Window) error         { return ErrUnsupported }
+func SetTitle(Window, string) error { return ErrUnsupported }

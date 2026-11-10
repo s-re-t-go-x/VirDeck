@@ -170,3 +170,38 @@ func TestScreenLayoutAutoFillWaitsForFirstLayout(t *testing.T) {
 		t.Fatal("auto-fill acted before a successful layout")
 	}
 }
+
+type positionedEmu struct {
+	*fakeEmu
+	bounds screenlayout.Rect
+	called bool
+}
+
+func (f *positionedEmu) StartProjectionWithBounds(_ context.Context, _ string, _ int, _ string, _ emu.ProjectionSettings, r screenlayout.Rect) (bool, error) {
+	f.bounds = r
+	f.called = true
+	return true, nil
+}
+func TestOpenScreenAtPassesGeometryAndRejectsInvalidBounds(t *testing.T) {
+	m, f, _ := newTestManager(t, 2, time.Second)
+	records, err := m.Create(context.Background(), CreateSpec{NamePrefix: "position", Count: 1, SystemImage: "system-images;android-30;google_apis_playstore;x86_64", MemoryMB: 2048, Cores: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := records[0].ID
+	_, _ = m.registry.Update(id, func(i *Instance) error { i.State = Running; i.Port = 5554; return nil })
+	backend := &positionedEmu{fakeEmu: f}
+	m.emu = backend
+	m.settings.ScreenLayout.AutoFill = true
+	want := screenlayout.Rect{X: -400, Y: 40, Width: 360, Height: 640}
+	if err := m.OpenScreenAt(context.Background(), id, want); err != nil {
+		t.Fatal(err)
+	}
+	if !backend.called || backend.bounds != want {
+		t.Fatalf("lost startup geometry: %+v", backend)
+	}
+	backend.called = false
+	if err := m.OpenScreenAt(context.Background(), id, screenlayout.Rect{}); err == nil || backend.called {
+		t.Fatal("invalid bounds reached backend")
+	}
+}

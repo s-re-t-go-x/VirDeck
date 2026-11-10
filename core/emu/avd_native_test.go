@@ -92,6 +92,26 @@ func TestIsolatedEnvPinsADBAuthenticationKeys(t *testing.T) {
 	t.Fatal("isolated emulator and ADB must use the same authentication key")
 }
 
+func TestCreateARM64AVDUsesEmulatorCPUArchitecture(t *testing.T) {
+	dir := t.TempDir()
+	c := NewControllerWithDataDir(dir, filepath.Join(dir, "sdk"), "", DefaultADBServerPort)
+	image := filepath.Join(c.SDKRoot(), "system-images", "android-35", "google_apis", "arm64-v8a")
+	if err := os.MkdirAll(image, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.CreateAVDNative("arm_device", "system-images;android-35;google_apis;arm64-v8a", 2048, 2, "720p"); err != nil {
+		t.Fatal(err)
+	}
+	cfg := readKeyValueFile(filepath.Join(c.AVDHome(), "arm_device.avd", "config.ini"))
+	if cfg["abi.type"] != "arm64-v8a" || cfg["hw.cpu.arch"] != "arm64" {
+		t.Fatalf("incorrect ARM ABI/CPU: %v", cfg)
+	}
+	ini := readKeyValueFile(filepath.Join(c.AVDHome(), "arm_device.ini"))
+	if ini["path.rel"] != filepath.Join("avd", "arm_device.avd") {
+		t.Fatalf("nonportable AVD relative path: %q", ini["path.rel"])
+	}
+}
+
 func TestDefaultDataDirectoryUsesVirDeck(t *testing.T) {
 	t.Setenv("VIRDECK_DATA_DIR", "")
 	dir := t.TempDir()

@@ -1,7 +1,5 @@
-//go:build !windows
+//go:build !windows && !darwin
 
 package screenlayout
 
-import "errors"
-
-func Close(Window) error { return errors.New("窗口操作仅支持 Windows") }
+func Close(Window) error { return ErrUnsupported }

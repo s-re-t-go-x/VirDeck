@@ -8,6 +8,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -15,7 +16,8 @@ import (
 )
 
 const transferSendMode = "发送到 Android"
-const transferReceiveMode = "接收到 Windows"
+
+var transferReceiveMode = "接收到 " + hostComputerName(runtime.GOOS)
 
 type transferUIState struct {
 	show, busy, picking, listing                                      bool
@@ -58,7 +60,7 @@ func (vm *viewModel) pickTransferPath(receive bool) {
 	go func() {
 		title := "选择要发送的文件"
 		if receive {
-			title = "选择 Windows 接收目录"
+			title = "选择电脑接收目录"
 		}
 		paths, err := mygo.Dialog.Open(mygo.OpenDialogOptions{Parent: win, Title: title, Directory: receive, Multiple: !receive, CreateDirectories: receive})
 		vm.post(func() {
@@ -224,7 +226,7 @@ func (vm *viewModel) buildTransferModal(c *ui.Context) {
 					ui.Text(c, "Android 接收目录").FontSize(12)
 					ui.TextInput(c.Key("transfer_remote_dir"), &s.remoteDir).Placeholder(service.DefaultTransferDirectory).Disabled(s.busy || s.picking)
 					ui.Text(c, "每次发送创建带时间戳的独立子目录，同名文件自动编号；完成后刷新相册。").FontSize(11).TextColor(theme.TextMuted)
-					ui.Textf(c, "已选择 %d 个 Windows 文件", len(s.localPaths)).FontSize(12)
+					ui.Textf(c, "已选择 %d 个本地文件", len(s.localPaths)).FontSize(12)
 					for i, p := range s.localPaths {
 						if i == 5 {
 							ui.Textf(c, "另有 %d 个文件", len(s.localPaths)-i).FontSize(11)
@@ -318,7 +320,7 @@ func (vm *viewModel) buildTransferModal(c *ui.Context) {
 						})
 					}
 					ui.Text(c, "接收目标: "+s.remotePath).FontSize(11).Tooltip(s.remotePath)
-					ui.TextInput(c.Key("transfer_local_dir"), &s.localDir).Placeholder("Windows 接收目录").Disabled(s.busy || s.picking)
+					ui.TextInput(c.Key("transfer_local_dir"), &s.localDir).Placeholder("电脑接收目录").Disabled(s.busy || s.picking)
 					if ui.Button(c.Key("transfer_pick_dir"), "选择接收目录").Disabled(s.busy || s.picking).Clicked() {
 						vm.pickTransferPath(true)
 					}

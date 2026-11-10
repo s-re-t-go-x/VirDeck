@@ -120,8 +120,9 @@ func (m *Manager) cleanupCandidates(ctx context.Context) (CleanupReport, []clean
 						}
 					}
 				} else if !entry.IsDir() {
+					lower := strings.ToLower(name)
 					switch {
-					case strings.HasSuffix(strings.ToLower(name), ".zip"):
+					case strings.HasSuffix(lower, ".zip"), strings.HasSuffix(lower, ".tar.gz"), strings.HasSuffix(lower, ".tgz"):
 						err = add(root, base, name, "download", &report.Downloads)
 					case strings.HasSuffix(name, ".part"), strings.HasSuffix(name, ".meta"):
 						err = add(root, base, name, "partial", &report.Partials)
