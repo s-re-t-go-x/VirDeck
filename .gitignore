@@ -14,3 +14,10 @@
 # Local logs and temporary files
 *.log
 *.tmp
+
+# Local environment and private key files
+.env
+.env.*
+!.env.example
+adbkey
+adbkey.pub

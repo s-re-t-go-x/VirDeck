@@ -71,7 +71,7 @@ func saveSettings(path string, s Settings) error {
 		return err
 	}
 	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, raw, 0o644); err != nil {
+	if err := os.WriteFile(tmp, raw, 0o600); err != nil {
 		return err
 	}
 	if err := os.Rename(tmp, path); err != nil {

@@ -124,6 +124,17 @@
 
 ### 4. 文件传输操作逻辑重新设计
 
+### 5. 安全加固与完整性校验（下一小版本优先 · 采纳 SEC-09 与 SEC-10）
+详见完整审核报告：[安全审核与加固报告](security-audit-report.md)
+
+- [ ] **组件下载支持 SHA-256 自适应校验（SEC-09）**：
+  - 在 [`core/downloader/downloader.go`](../core/downloader/downloader.go) 中扩展哈希校验：自动根据哈希字符串长度识别 SHA-256（64 位 hex）与 SHA-1（40 位 hex），实现自适应校验与断点续传验证。
+  - 为 [`config/defaults.json`](../config/defaults.json) 中预设的 `scrcpy` 跨平台发布包（`scrcpy-win64`、`scrcpy-macos`、`scrcpy-linux`）及推荐系统镜像补充官方固定的 SHA-256 校验和。
+  - 在自定义镜像或无哈希下载任务的 UI 处增加醒目的「未提供安全校验和」提示，避免无验证直接解压。
+- [ ] **依赖版本更新与供应链加固（SEC-10 & SEC-11）**：
+  - 在下一次外网环境发版或依赖常规升级时，执行 `go get golang.org/x/net@v0.62.0` 并运行 `go mod tidy`。
+  - 将 [`.github/workflows/cross-platform.yml`](../.github/workflows/cross-platform.yml) 中引用的第三方 Action（如 `softprops/action-gh-release`、`actions/checkout`）锁定为完整 40 位 Git Commit SHA。
+
 ---
 
 ## 五、明确不纳入当前范围的功能

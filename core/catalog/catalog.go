@@ -465,7 +465,20 @@ func SplitPackageID(pkgID string) (apiDir, tag, abi string) {
 	if len(parts) != 4 || parts[0] != "system-images" {
 		return "", "", ""
 	}
+	if !isSafePackageSegment(parts[1]) || !isSafePackageSegment(parts[2]) || !isSafePackageSegment(parts[3]) {
+		return "", "", ""
+	}
 	return parts[1], parts[2], parts[3]
+}
+
+func isSafePackageSegment(seg string) bool {
+	if seg == "" || seg == "." || seg == ".." {
+		return false
+	}
+	if strings.ContainsAny(seg, `/\:*?"<>|`+"\x00\r\n") {
+		return false
+	}
+	return true
 }
 
 func tagDisplayName(tag, fallback string) string {

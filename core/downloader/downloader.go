@@ -142,8 +142,8 @@ func (c *Client) Download(ctx context.Context, targetID, name, urlStr, expectedS
 	if err != nil {
 		return "", fmt.Errorf("无效的下载 URL: %w", err)
 	}
-	baseName := filepath.Base(parsed.Path)
-	if baseName == "" || baseName == "." || baseName == "/" {
+	baseName := sanitizeFileName(filepath.Base(parsed.Path))
+	if baseName == "" || baseName == "." || baseName == ".." || baseName == "archive" {
 		baseName = sanitizeFileName(targetID) + ".zip"
 	}
 	finalPath := filepath.Join(c.downloadsDir, baseName)
@@ -697,9 +697,13 @@ func (c *Client) FetchRepositoryPackagesForHost(ctx context.Context, xmlURL, goo
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("获取仓库索引 %s 失败: HTTP %d", xmlURL, resp.StatusCode)
 	}
-	data, err := io.ReadAll(resp.Body)
+	const maxManifestBytes = 64 << 20 // 64 MiB
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxManifestBytes+1))
 	if err != nil {
 		return nil, err
+	}
+	if len(data) > maxManifestBytes {
+		return nil, fmt.Errorf("仓库索引 %s 超过大小上限 (%d MiB)", xmlURL, maxManifestBytes>>20)
 	}
 	baseURL := xmlURL[:strings.LastIndex(xmlURL, "/")+1]
 	return ParseRepositoryXMLForHost(data, baseURL, goos, goarch)
@@ -872,9 +876,9 @@ func savePartMeta(path string, m partMeta) error {
 }
 
 func sanitizeFileName(s string) string {
-	r := strings.NewReplacer(";", "_", "/", "_", "\\", "_", ":", "_", " ", "_")
+	r := strings.NewReplacer(";", "_", "/", "_", "\\", "_", ":", "_", " ", "_", "*", "_", "?", "_", "\"", "_", "<", "_", ">", "_", "|", "_")
 	out := r.Replace(strings.TrimSpace(s))
-	if out == "" {
+	if out == "" || out == "." || out == ".." {
 		return "archive"
 	}
 	return out

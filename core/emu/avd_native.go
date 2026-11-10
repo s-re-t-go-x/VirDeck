@@ -1,6 +1,8 @@
 package emu
 
 import (
+	"bytes"
+	"encoding/xml"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -36,11 +38,13 @@ func (c *Controller) CreateAVDNative(name, systemImage string, memoryMB, cores i
 	if c.sdkRoot == "" {
 		return fmt.Errorf("未配置 Android SDK 根目录 (ANDROID_SDK_ROOT)")
 	}
-	parts := strings.Split(strings.TrimSpace(systemImage), ";")
-	if len(parts) != 4 || parts[0] != "system-images" {
+	if !isSafePathSegment(name) {
+		return fmt.Errorf("无效的 AVD 名称: %s", name)
+	}
+	apiFolder, tagDir, abi, ok := splitSystemImageID(systemImage)
+	if !ok {
 		return fmt.Errorf("系统镜像包格式无效 (%s)，应为 system-images;android-<API>;<tag>;<abi>", systemImage)
 	}
-	apiFolder, tagDir, abi := parts[1], parts[2], parts[3]
 
 	sysImgDir := filepath.Join(c.sdkRoot, "system-images", apiFolder, tagDir, abi)
 	if !dirExists(sysImgDir) {
@@ -88,9 +92,9 @@ func (c *Controller) CreateAVDNative(name, systemImage string, memoryMB, cores i
 
 	var cfg strings.Builder
 	w := func(k, v string) {
-		cfg.WriteString(k)
+		cfg.WriteString(cleanIniLine(k))
 		cfg.WriteString("=")
-		cfg.WriteString(v)
+		cfg.WriteString(cleanIniLine(v))
 		cfg.WriteString("\n")
 	}
 
@@ -170,42 +174,41 @@ func (c *Controller) CreateAVDNative(name, systemImage string, memoryMB, cores i
 // (if missing) and creates the corresponding platforms/<apiFolder> and platform-tools placeholder directories
 // required by emulator.exe's path_is_valid_sdk_root() check.
 func EnsureSystemImageMetadata(sdkRoot, systemImage string) error {
-	parts := strings.Split(strings.TrimSpace(systemImage), ";")
-	if len(parts) != 4 || parts[0] != "system-images" {
+	apiFolder, tagDir, abi, ok := splitSystemImageID(systemImage)
+	if !ok {
 		return fmt.Errorf("无效的镜像包 ID: %s", systemImage)
 	}
-	apiFolder, tagDir, abi := parts[1], parts[2], parts[3]
 	sysImgDir := filepath.Join(sdkRoot, "system-images", apiFolder, tagDir, abi)
 	if err := os.MkdirAll(sysImgDir, 0o755); err != nil {
 		return err
 	}
 
 	props := readKeyValueFile(filepath.Join(sysImgDir, "source.properties"))
-	apiLevel := strings.TrimSpace(props["AndroidVersion.ApiLevel"])
+	apiLevel := cleanIniLine(strings.TrimSpace(props["AndroidVersion.ApiLevel"]))
 	if apiLevel == "" {
 		apiLevel = strings.TrimPrefix(apiFolder, "android-")
 	}
 	revMajor := "1"
-	if r := strings.TrimSpace(props["Pkg.Revision"]); r != "" {
+	if r := cleanIniLine(strings.TrimSpace(props["Pkg.Revision"])); r != "" {
 		revMajor = strings.Split(r, ".")[0]
 	}
-	tagIDs := strings.TrimSpace(props["SystemImage.TagId"])
+	tagIDs := cleanIniLine(strings.TrimSpace(props["SystemImage.TagId"]))
 	if tagIDs == "" {
 		tagIDs = tagDir
 	}
-	tagDisplays := strings.TrimSpace(props["SystemImage.TagDisplay"])
+	tagDisplays := cleanIniLine(strings.TrimSpace(props["SystemImage.TagDisplay"]))
 	if tagDisplays == "" {
 		tagDisplays = defaultTagDisplay(tagDir)
 	}
-	vendorID := strings.TrimSpace(props["Addon.VendorId"])
+	vendorID := cleanIniLine(strings.TrimSpace(props["Addon.VendorId"]))
 	if vendorID == "" {
 		vendorID = "google"
 	}
-	vendorDisplay := strings.TrimSpace(props["Addon.VendorDisplay"])
+	vendorDisplay := cleanIniLine(strings.TrimSpace(props["Addon.VendorDisplay"]))
 	if vendorDisplay == "" {
 		vendorDisplay = "Google Inc."
 	}
-	desc := strings.TrimSpace(props["Pkg.Desc"])
+	desc := cleanIniLine(strings.TrimSpace(props["Pkg.Desc"]))
 	if desc == "" {
 		if strings.HasPrefix(abi, "arm") {
 			desc = fmt.Sprintf("ARM %s System Image (API %s)", abi, apiLevel)
@@ -237,7 +240,7 @@ func EnsureSystemImageMetadata(sdkRoot, systemImage string) error {
 			if i < len(dispList) && strings.TrimSpace(dispList[i]) != "" {
 				tdisp = strings.TrimSpace(dispList[i])
 			}
-			tagXML.WriteString(fmt.Sprintf("            <tag>\n                <id>%s</id>\n                <display>%s</display>\n            </tag>\n", tid, tdisp))
+			tagXML.WriteString(fmt.Sprintf("            <tag>\n                <id>%s</id>\n                <display>%s</display>\n            </tag>\n", xmlEscape(tid), xmlEscape(tdisp)))
 		}
 
 		extXML := ""
@@ -246,9 +249,10 @@ func EnsureSystemImageMetadata(sdkRoot, systemImage string) error {
 			if baseExt == "" {
 				baseExt = "true"
 			}
-			extXML = fmt.Sprintf("            <extension-level>%s</extension-level>\n            <base-extension>%s</base-extension>\n", ext, baseExt)
+			extXML = fmt.Sprintf("            <extension-level>%s</extension-level>\n            <base-extension>%s</base-extension>\n", xmlEscape(ext), xmlEscape(baseExt))
 		}
 
+		canonicalPkgID := fmt.Sprintf("system-images;%s;%s;%s", apiFolder, tagDir, abi)
 		xmlContent := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <ns2:repository xmlns:ns2="http://schemas.android.com/repository/android/common/02" xmlns:ns12="http://schemas.android.com/sdk/android/repo/sys-img2/04" xmlns:ns13="http://schemas.android.com/sdk/android/repo/sys-img2/03" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
     <license id="android-sdk-license" type="text">Android Software Development Kit License Agreement</license>
@@ -269,7 +273,7 @@ func EnsureSystemImageMetadata(sdkRoot, systemImage string) error {
         <uses-license ref="android-sdk-license"/>
     </localPackage>
 </ns2:repository>
-`, systemImage, apiLevel, extXML, tagXML.String(), vendorID, vendorDisplay, abi, abi, revMajor, desc)
+`, xmlEscape(canonicalPkgID), xmlEscape(apiLevel), extXML, tagXML.String(), xmlEscape(vendorID), xmlEscape(vendorDisplay), xmlEscape(abi), xmlEscape(abi), xmlEscape(revMajor), xmlEscape(desc))
 
 		if err := os.WriteFile(pkgXMLPath, []byte(xmlContent), 0o644); err != nil {
 			return fmt.Errorf("生成 package.xml 失败: %w", err)
@@ -402,4 +406,37 @@ func defaultTagDisplay(tag string) string {
 	default:
 		return "Android System Image"
 	}
+}
+
+func splitSystemImageID(systemImage string) (apiFolder, tagDir, abi string, ok bool) {
+	parts := strings.Split(strings.TrimSpace(systemImage), ";")
+	if len(parts) != 4 || parts[0] != "system-images" {
+		return "", "", "", false
+	}
+	if !isSafePathSegment(parts[1]) || !isSafePathSegment(parts[2]) || !isSafePathSegment(parts[3]) {
+		return "", "", "", false
+	}
+	return parts[1], parts[2], parts[3], true
+}
+
+func isSafePathSegment(seg string) bool {
+	if seg == "" || seg == "." || seg == ".." {
+		return false
+	}
+	if strings.ContainsAny(seg, `/\:*?"<>|`+"\x00\r\n") {
+		return false
+	}
+	return true
+}
+
+func cleanIniLine(s string) string {
+	s = strings.ReplaceAll(s, "\r", "")
+	s = strings.ReplaceAll(s, "\n", " ")
+	return strings.TrimSpace(s)
+}
+
+func xmlEscape(s string) string {
+	var buf bytes.Buffer
+	_ = xml.EscapeText(&buf, []byte(s))
+	return buf.String()
 }

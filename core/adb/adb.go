@@ -194,6 +194,10 @@ func (c *Client) EmuKill(ctx context.Context, port int) error {
 
 // InstallAPK installs or replaces an APK on a single emulator port.
 func (c *Client) InstallAPK(ctx context.Context, port int, apkPath string) (string, error) {
+	apkPath = strings.TrimSpace(apkPath)
+	if apkPath == "" || strings.HasPrefix(apkPath, "-") {
+		return "", fmt.Errorf("无效的 APK 路径: %q", apkPath)
+	}
 	return c.run(ctx, "-s", Serial(port), "install", "-r", apkPath)
 }
 

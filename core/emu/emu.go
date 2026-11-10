@@ -184,7 +184,7 @@ func NewControllerWithDataDir(dataDir, sdkRoot, avdHome string, adbServerPort in
 		c.avdHome = discoverAVDHome(dataDir)
 	}
 	_ = os.MkdirAll(c.avdHome, 0o755)
-	_ = os.MkdirAll(c.androidHomeDir, 0o755)
+	_ = os.MkdirAll(c.androidHomeDir, 0o700)
 	_ = c.HealAVDIniPaths()
 	return c
 }
@@ -707,6 +707,9 @@ func (c *Controller) CloneAVD(srcName, dstName string) error {
 	if c.avdHome == "" {
 		return fmt.Errorf("未知的 AVD 目录 (ANDROID_AVD_HOME)")
 	}
+	if !isSafePathSegment(srcName) || !isSafePathSegment(dstName) {
+		return fmt.Errorf("无效的 AVD 名称")
+	}
 	srcDir := filepath.Join(c.avdHome, srcName+".avd")
 	dstDir := filepath.Join(c.avdHome, dstName+".avd")
 	if !dirExists(srcDir) {
@@ -811,6 +814,9 @@ func copyFile(src, dst string) error {
 
 // DeleteAVD deletes the AVD directory and .ini file directly in pure Go.
 func (c *Controller) DeleteAVD(ctx context.Context, name string) error {
+	if !isSafePathSegment(name) {
+		return fmt.Errorf("无效的 AVD 名称: %s", name)
+	}
 	if c.avdHome != "" {
 		_ = os.RemoveAll(filepath.Join(c.avdHome, name+".avd"))
 		_ = os.Remove(filepath.Join(c.avdHome, name+".ini"))
