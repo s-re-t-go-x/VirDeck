@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"os/exec"
 	"path"
@@ -102,6 +103,14 @@ func (c *Client) transferCanonical(ctx context.Context, port int, p string) (str
 	return out, nil
 }
 
+// MediaScanWarning means all files arrived but Android's gallery refresh failed.
+type MediaScanWarning struct{ Err error }
+
+func (e *MediaScanWarning) Error() string {
+	return "文件已发送，相册刷新失败: " + e.Err.Error()
+}
+func (e *MediaScanWarning) Unwrap() error { return e.Err }
+
 // TransferSend reserves a fresh Android folder before pushing; neither existing
 // guest files nor same-named Windows inputs can overwrite one another.
 func (c *Client) TransferSend(ctx context.Context, port int, localPaths []string, remoteDir string) (string, error) {
@@ -121,7 +130,7 @@ func (c *Client) TransferSend(ctx context.Context, port int, localPaths []string
 			return "", fmt.Errorf("只支持普通文件: %s", p)
 		}
 	}
-	script := "# virdeck:reserve\np=" + transferQuote(remoteDir) + `; q="$p"; while [ ! -e "$q" ]; do q=${q%/*}; [ -n "$q" ] || exit 1; done; r=$(readlink -f -- "$q") || exit; ` + transferSharedGuard + `mkdir -p -- "$p" || exit; r=$(readlink -f -- "$p") || exit; ` + transferSharedGuard + `mktemp -d "$r/transfer-XXXXXXXX"`
+	script := "# virdeck:reserve\np=" + transferQuote(remoteDir) + `; q="$p"; while [ ! -e "$q" ]; do q=${q%/*}; [ -n "$q" ] || exit 1; done; r=$(readlink -f -- "$q") || exit; ` + transferSharedGuard + `mkdir -p -- "$p" || exit; r=$(readlink -f -- "$p") || exit; ` + transferSharedGuard + `mktemp -d "$r/` + time.Now().Format("20060102-150405") + `-XXXXXXXX"`
 	out, err := c.transferRun(ctx, "-s", Serial(port), "shell", script)
 	if err != nil {
 		return "", err
@@ -131,6 +140,7 @@ func (c *Client) TransferSend(ctx context.Context, port int, localPaths []string
 		return "", err
 	}
 	used := map[string]bool{}
+	var scanErrors []error
 	for _, p := range localPaths {
 		abs, e := filepath.Abs(p)
 		if e != nil {
@@ -146,6 +156,13 @@ func (c *Client) TransferSend(ctx context.Context, port int, localPaths []string
 		if _, err = c.transferRun(ctx, "-s", Serial(port), "push", abs, path.Join(dest, name)); err != nil {
 			return dest, fmt.Errorf("%s → %s: %w", p, dest, err)
 		}
+		uri := (&url.URL{Scheme: "file", Path: path.Join(dest, name)}).String()
+		if _, e := c.transferRun(ctx, "-s", Serial(port), "shell", "am broadcast -a android.intent.action.MEDIA_SCANNER_SCAN_FILE -d "+transferQuote(uri)); e != nil {
+			scanErrors = append(scanErrors, e)
+		}
+	}
+	if len(scanErrors) > 0 {
+		return dest, &MediaScanWarning{Err: errors.Join(scanErrors...)}
 	}
 	return dest, nil
 }

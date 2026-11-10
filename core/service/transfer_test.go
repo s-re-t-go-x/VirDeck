@@ -80,7 +80,7 @@ func TestTransferServiceExportsWithoutOverwritingAndSendsRealFile(t *testing.T) 
 	if err := os.WriteFile(src, []byte("windows"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if err := m.SendFiles(context.Background(), SendFilesRequest{IDs: []string{id}, LocalPaths: []string{src}}); err != nil {
+	if _, err := m.SendFiles(context.Background(), SendFilesRequest{IDs: []string{id}, LocalPaths: []string{src}}); err != nil {
 		t.Fatal(err)
 	}
 	exports, _ := os.ReadDir(a.root)
@@ -112,7 +112,7 @@ func TestTransferServiceExportsWithoutOverwritingAndSendsRealFile(t *testing.T) 
 }
 func TestTransferServiceRejectsStoppedPrivateAndMissingInputs(t *testing.T) {
 	m, a, id := transferManager(t)
-	if err := m.SendFiles(context.Background(), SendFilesRequest{IDs: []string{id}, LocalPaths: []string{filepath.Join(t.TempDir(), "missing")}}); err == nil {
+	if _, err := m.SendFiles(context.Background(), SendFilesRequest{IDs: []string{id}, LocalPaths: []string{filepath.Join(t.TempDir(), "missing")}}); err == nil {
 		t.Fatal("missing local source accepted")
 	}
 	if _, err := m.ReceiveFiles(context.Background(), id, "/data/data/app", t.TempDir()); err == nil {
@@ -141,7 +141,10 @@ func TestTransferServiceFailureKeepsExactDiagnosticAndCancellation(t *testing.T)
 	a.release = make(chan struct{})
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { done <- m.SendFiles(ctx, SendFilesRequest{IDs: []string{id}, LocalPaths: []string{src}}) }()
+	go func() {
+		_, err := m.SendFiles(ctx, SendFilesRequest{IDs: []string{id}, LocalPaths: []string{src}})
+		done <- err
+	}()
 	<-a.entered
 	if m.maintenance.TryLock() {
 		m.maintenance.Unlock()

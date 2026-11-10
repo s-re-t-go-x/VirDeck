@@ -49,6 +49,8 @@ var workbenchIcons = func() map[string]*ui.SVG {
 		"terminal": "m5 7 5 5-5 5 M13 17h6",
 		"trash":    "M3 6h18 M9 6V3h6v3 M6 6l1 15h10l1-15 M10 10v7 M14 10v7",
 		"network":  "M12 3v7 M4 21v-7h16v7 M12 14v7 M8 3h8v5H8z",
+		"volume":   "M11 5 6 9H2v6h4l5 4V5z M15.5 8.5a5 5 0 0 1 0 7 M19 5a10 10 0 0 1 0 14",
+		"mute":     "M11 5 6 9H2v6h4l5 4V5z M22 9l-6 6 M16 9l6 6",
 	}
 	icons := make(map[string]*ui.SVG, len(paths))
 	for name, path := range paths {
@@ -141,13 +143,16 @@ func (vm *viewModel) buildSettingsModal(c *ui.Context) {
 		modalContent(c, 620).Padding(8).Gap(14).Children(func() {
 			ui.Row(c).Gap(10).Children(func() { glyph(c, "settings", 20).TextColor(c.Theme().Accent); ui.Text(c, "设置").FontSize(20).Bold() })
 			ui.Tabs(c, &vm.settingsTab, "常规", "投屏与声音")
-			ui.Scroll(c).Height(min(340, max(110, h-260))).Gap(12).Children(func() { vm.buildSettingsTab(c) })
-			ui.Row(c).Gap(8).Children(func() {
+			ui.Scroll(c).Height(min(340, max(110, h-250))).Gap(12).Children(func() { vm.buildSettingsTab(c) })
+			ui.Row(c).Gap(8).Wrap().Children(func() {
 				ui.Spacer(c)
 				if ui.Button(c.Key("close_settings"), "关闭设置").Clicked() {
 					vm.showSettings = false
 				}
-				if ui.PrimaryButton(c.Key("save_settings"), "保存全局设置").Clicked() {
+				if vm.settingsTab == 1 && ui.Button(c.Key("save_settings_reopen"), "保存并重开已打开投屏").Disabled(vm.settingsRefreshing).Clicked() {
+					vm.saveGlobalAndReopen()
+				}
+				if ui.PrimaryButton(c.Key("save_settings"), "保存全局设置").Disabled(vm.settingsRefreshing).Clicked() {
 					vm.saveGlobalSettings()
 				}
 			})

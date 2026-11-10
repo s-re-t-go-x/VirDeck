@@ -250,3 +250,30 @@ func TestTransferBoundsDiagnosticsAndHonorsCancellation(t *testing.T) {
 		t.Fatal("cancellation blocked")
 	}
 }
+
+func TestTransferSendScansEachUploadedFile(t *testing.T) {
+	c, record := transferClient(t)
+	p := filepath.Join(t.TempDir(), "photo #1%.jpg")
+	if err := os.WriteFile(p, []byte("photo"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	dest, err := c.TransferSend(context.Background(), 5554, []string{p}, "/sdcard/Download")
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := os.ReadFile(record)
+	var scans int
+	for _, line := range strings.Split(strings.TrimSpace(string(raw)), "\n") {
+		var args []string
+		_ = json.Unmarshal([]byte(line), &args)
+		if len(args) > 3 && args[2] == "shell" && strings.Contains(args[3], "android.intent.action.MEDIA_SCANNER_SCAN_FILE") {
+			scans++
+			if !strings.Contains(args[3], "file://"+dest+"/photo%20%231%25.jpg") {
+				t.Fatalf("wrong scan URI: %q", args)
+			}
+		}
+	}
+	if scans != 1 {
+		t.Fatalf("media scan commands = %d, want 1", scans)
+	}
+}

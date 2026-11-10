@@ -86,5 +86,34 @@
     "maxSize": 1280,
     "bitRateMbps": 8,
     "audio": false
-  }
+  },
+  "projectionPresets": [
+    {
+      "name": "省资源多开",
+      "hint": "后台巡检",
+      "settings": {
+        "maxFPS": 15,
+        "maxSize": 960,
+        "bitRateMbps": 2
+      }
+    },
+    {
+      "name": "均衡日常",
+      "hint": "日常操作",
+      "settings": {
+        "maxFPS": 60,
+        "maxSize": 1280,
+        "bitRateMbps": 8
+      }
+    },
+    {
+      "name": "高清流畅",
+      "hint": "画面细节",
+      "settings": {
+        "maxFPS": 60,
+        "maxSize": 1920,
+        "bitRateMbps": 16
+      }
+    }
+  ]
 }

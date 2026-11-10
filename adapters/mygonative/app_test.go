@@ -1065,3 +1065,64 @@ func TestCompactActionBarOpensEditorDirectly(t *testing.T) {
 		t.Fatal("direct edit button did not open selected instance")
 	}
 }
+
+func TestErrorFeedbackAndClipboardAndStartingProgress(t *testing.T) {
+	vm := newTestVM(t)
+	vm.appendLog("[10:00:00] 第一条日志")
+	vm.appendLog("[10:00:05] 第二条日志")
+	_ = vm.startTaskForTest("启动", actStart)
+
+	// 1. Narrow window (< 900px) still shows "查看失败原因" in the dock bar.
+	tester := ui.NewTester(vm.view, 610, 480)
+	tester.Frame()
+	if !tester.HasText("模拟器进程在完成引导前意外退出") {
+		t.Fatal("failed instance row should show inline error summary in narrow window")
+	}
+	if err := tester.Click("查看失败原因"); err != nil {
+		t.Fatalf("narrow window hid 查看失败原因 button: %v", err)
+	}
+	if !vm.tasksOpen || vm.panelTab != 0 {
+		t.Fatalf("clicking 查看失败原因 should open task panel tab 0, got open=%v tab=%d", vm.tasksOpen, vm.panelTab)
+	}
+
+	// 2. Switch to 运行日志 tab and click 复制日志.
+	vm.panelTab = 1
+	tester.Frame()
+	if err := tester.Click("复制日志"); err != nil {
+		t.Fatalf("missing 复制日志 button: %v", err)
+	}
+	if vm.copiedText != "[10:00:00] 第一条日志\n[10:00:05] 第二条日志" {
+		t.Fatalf("unexpected copied logs: %q", vm.copiedText)
+	}
+
+	// 3. Select failed instance in wide window and click 复制错误 in detail pane.
+	vm.tasksOpen = false
+	vm.selected.Clear()
+	vm.selected.Add("11223344") // base_01 (Failed)
+	tester.SetSize(1180, 740)
+	tester.Frame()
+	if err := tester.Click("复制错误"); err != nil {
+		t.Fatalf("missing 复制错误 button in detail pane: %v", err)
+	}
+	if vm.copiedText != "模拟器进程在完成引导前意外退出" {
+		t.Fatalf("unexpected copied error: %q", vm.copiedText)
+	}
+
+	// 4. Starting state shows elapsed seconds and boot stage hint, then clears on Running.
+	vm.instances[1].State = service.Starting
+	vm.startingSince[vm.instances[1].ID] = time.Now().Add(-18 * time.Second)
+	vm.selected.Clear()
+	vm.selected.Add(vm.instances[1].ID)
+	tester.Frame()
+	if !tester.HasText("等待桌面就绪") || !tester.HasText("正在引导 Android 系统，等待桌面就绪…") {
+		t.Fatalf("starting stage hints missing: %v", tester.Texts())
+	}
+	if got := vm.instanceStateLabel(vm.instances[1]); got == "◐ 启动中" {
+		t.Fatalf("expected elapsed seconds in starting state label, got %q", got)
+	}
+	vm.instances[1].State = service.Running
+	tester.Frame()
+	if _, ok := vm.startingSince[vm.instances[1].ID]; ok {
+		t.Fatal("starting timer should be cleared once instance leaves Starting state")
+	}
+}

@@ -136,7 +136,7 @@ VirDeckData/
 
 - **[使用指南 (docs/usage.md)](docs/usage.md)**：环境配置、实例管理、多窗口投屏排版、投屏与声音参数、文件收发、分组管理、空间清理与 CLI 详细用法。
 - **[开发与架构文档 (docs/development.md)](docs/development.md)**：分层架构、核心技术机制、配置规范与历史里程碑归档。
-- **[当前开发待办 (docs/TODO.md)](docs/TODO.md)**：已完成基础功能、**下一阶段交互与人性化改进清单**及后续工作会话规划。
+- **[当前开发待办 (docs/TODO.md)](docs/TODO.md)**：已完成基础功能、**下一阶段交互与人性化改进清单**，以及后续工作会话与跨平台（macOS / Linux）适配规划。
 
 日常开发提交前请运行单元与静态检查：
 

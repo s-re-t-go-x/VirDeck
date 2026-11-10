@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 	"virdeck/core/service"
@@ -17,15 +18,90 @@ type transferTestService struct {
 	service.Service
 	sent     chan service.SendFilesRequest
 	received chan string
+	list     func(context.Context, string, string) ([]service.TransferFile, error)
 }
 
-func (s *transferTestService) SendFiles(_ context.Context, r service.SendFilesRequest) error {
+func (s *transferTestService) SendFiles(_ context.Context, r service.SendFilesRequest) (map[string]string, error) {
 	s.sent <- r
-	return nil
+	return map[string]string{r.IDs[0]: r.RemoteDir + "/batch"}, nil
 }
 func (s *transferTestService) ReceiveFiles(_ context.Context, id, remote, local string) (string, error) {
 	s.received <- id + "|" + remote + "|" + local
 	return local + "/unique", nil
+}
+
+func (s *transferTestService) ListTransferFiles(ctx context.Context, id, dir string) ([]service.TransferFile, error) {
+	if s.list != nil {
+		return s.list(ctx, id, dir)
+	}
+	return []service.TransferFile{{Name: "照片.jpg"}, {Name: "相册", IsDir: true}}, nil
+}
+
+func TestTransferBrowseRejectsLateResultsFromChangedPath(t *testing.T) {
+	vm := newTestVM(t)
+	release := make(chan struct{})
+	posts := make(chan func(), 16)
+	vm.post = func(f func()) { posts <- f }
+	vm.svc = &transferTestService{Service: vm.svc, list: func(context.Context, string, string) ([]service.TransferFile, error) {
+		<-release
+		return []service.TransferFile{{Name: "old.txt"}}, nil
+	}}
+	vm.openTransfer(vm.instances[:1])
+	vm.transfer.mode = transferReceiveMode
+	vm.browseTransfer("/sdcard/Download")
+	vm.transfer.remotePath = "/sdcard/DCIM"
+	close(release)
+	select {
+	case f := <-posts:
+		f()
+	case <-time.After(3 * time.Second):
+		t.Fatal("listing stalled")
+	}
+	if len(vm.transfer.entries) != 0 || vm.transfer.listing {
+		t.Fatal("stale listing remained active")
+	}
+}
+
+func TestTransferBrowseSelectsFileWithoutReceivingWholeDirectory(t *testing.T) {
+	vm := newTestVM(t)
+	posts := make(chan func(), 16)
+	vm.post = func(f func()) { posts <- f }
+	vm.svc = &transferTestService{Service: vm.svc}
+	vm.openTransfer(vm.instances[:1])
+	vm.transfer.mode = transferReceiveMode
+	vm.browseTransfer("/sdcard/Download")
+	select {
+	case f := <-posts:
+		f()
+	case <-time.After(3 * time.Second):
+		t.Fatal("listing stalled")
+	}
+	tester := ui.NewTester(vm.view, 1180, 780)
+	tester.Frame()
+	if err := tester.Click("文件 · 照片.jpg"); err != nil {
+		t.Fatal(err)
+	}
+	if vm.transfer.remotePath != "/sdcard/Download/照片.jpg" {
+		t.Fatalf("selection = %q", vm.transfer.remotePath)
+	}
+	tester.Frame()
+	if err := tester.Click("文件 · 照片.jpg"); err != nil {
+		t.Fatal(err)
+	}
+	if vm.transfer.remotePath != "/sdcard/Download" {
+		t.Fatalf("toggle off selection = %q", vm.transfer.remotePath)
+	}
+	tester.Frame()
+	if err := tester.Click("文件 · 照片.jpg"); err != nil {
+		t.Fatal(err)
+	}
+	tester.Frame()
+	if err := tester.Click("上一级"); err != nil {
+		t.Fatal(err)
+	}
+	if vm.transfer.remotePath != "/sdcard" {
+		t.Fatalf("parent from selected file = %q, want /sdcard", vm.transfer.remotePath)
+	}
 }
 
 func TestTransferModalFreezesTargetsAndSendsFromLiveForm(t *testing.T) {
@@ -149,6 +225,10 @@ func TestRenderTransferModal(t *testing.T) {
 			vm.transfer.mode = mode
 			vm.transfer.localPaths = []string{"C:/资料/照片.jpg"}
 			vm.transfer.localDir = "C:/Users/用户/Downloads"
+			vm.transfer.listedID = vm.transfer.receiveID
+			vm.transfer.listedPath = "/sdcard/Download"
+			vm.transfer.listMessage = "2 项 · 点击文件选中，点击文件夹进入"
+			vm.transfer.entries = []service.TransferFile{{Name: "相册", IsDir: true}, {Name: "照片.jpg"}}
 			tester := ui.NewTester(vm.view, width, 480)
 			tester.Frame()
 			suffix := "send"
@@ -165,5 +245,34 @@ func TestRenderTransferModal(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
+	}
+}
+
+func TestTransferReceiveShowsActualExportAndRemembersDirectory(t *testing.T) {
+	vm := newTestVM(t)
+	vm.svc = &transferTestService{Service: vm.svc, received: make(chan string, 1)}
+	posts := make(chan func(), 16)
+	vm.post = func(f func()) { posts <- f }
+	vm.openTransfer(vm.instances[:1])
+	if vm.transfer.localDir == "" {
+		t.Error("missing default receive directory")
+	}
+	vm.transfer.mode = transferReceiveMode
+	vm.transfer.localDir = "C:/exports"
+	vm.startTransfer()
+	for vm.transfer.busy {
+		select {
+		case f := <-posts:
+			f()
+		case <-time.After(3 * time.Second):
+			t.Fatal("completion stalled")
+		}
+	}
+	if !strings.Contains(vm.transfer.message, "C:/exports/unique") {
+		t.Fatalf("export path missing: %s", vm.transfer.message)
+	}
+	vm.openTransfer(vm.instances[:1])
+	if vm.transfer.localDir != "C:/exports" {
+		t.Fatalf("receive directory forgotten: %q", vm.transfer.localDir)
 	}
 }

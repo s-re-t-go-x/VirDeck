@@ -122,7 +122,7 @@ type Service interface {
 	SetHeadless(ctx context.Context, id string, headless bool) error
 	InstallAPK(ctx context.Context, ids []string, apkPath string) error
 	Shell(ctx context.Context, ids []string, cmd string) (map[string]string, error)
-	SendFiles(context.Context, SendFilesRequest) error
+	SendFiles(context.Context, SendFilesRequest) (map[string]string, error)
 	ReceiveFiles(context.Context, string, string, string) (string, error)
 	ListTransferFiles(context.Context, string, string) ([]TransferFile, error)
 	OpenScreen(ctx context.Context, id string) error

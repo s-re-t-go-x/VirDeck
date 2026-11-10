@@ -27,7 +27,7 @@ type fileADB interface {
 	TransferList(context.Context, int, string) ([]adb.TransferEntry, error)
 }
 
-func (m *Manager) SendFiles(ctx context.Context, req SendFilesRequest) error {
+func (m *Manager) SendFiles(ctx context.Context, req SendFilesRequest) (map[string]string, error) {
 	m.maintenance.RLock()
 	defer m.maintenance.RUnlock()
 	if req.RemoteDir == "" {
@@ -35,33 +35,42 @@ func (m *Manager) SendFiles(ctx context.Context, req SendFilesRequest) error {
 	}
 	dir, err := adb.SharedStoragePath(req.RemoteDir)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if len(req.LocalPaths) == 0 {
-		return errors.New("请选择要发送的本地文件")
+		return nil, errors.New("请选择要发送的本地文件")
 	}
 	for _, p := range req.LocalPaths {
 		info, e := os.Stat(p)
 		if e != nil {
-			return e
+			return nil, e
 		}
 		if !info.Mode().IsRegular() {
-			return fmt.Errorf("只支持普通文件: %s", p)
+			return nil, fmt.Errorf("只支持普通文件: %s", p)
 		}
 	}
 	ports, err := m.resolveRunningPorts(req.IDs)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	backend, ok := m.adb.(fileADB)
 	if !ok {
-		return errors.New("当前 ADB 后端不支持文件传输")
+		return nil, errors.New("当前 ADB 后端不支持文件传输")
 	}
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Minute)
 	defer cancel()
 	var errs []error
+	destinations := make(map[string]string)
 	for id, port := range ports {
 		dest, e := backend.TransferSend(ctx, port, req.LocalPaths, dir)
+		if dest != "" {
+			destinations[id] = dest
+		}
+		var warning *adb.MediaScanWarning
+		if errors.As(e, &warning) {
+			m.emitLog(id, warning.Error())
+			e = nil
+		}
 		if e != nil {
 			e = fmt.Errorf("[%s] 发送文件失败（目录 %s）: %w", id, dest, e)
 			m.emitLog(id, e.Error())
@@ -70,7 +79,7 @@ func (m *Manager) SendFiles(ctx context.Context, req SendFilesRequest) error {
 			m.emitLog(id, fmt.Sprintf("已发送 %d 个文件到 %s", len(req.LocalPaths), dest))
 		}
 	}
-	return errors.Join(errs...)
+	return destinations, errors.Join(errs...)
 }
 
 func (m *Manager) ReceiveFiles(ctx context.Context, id, remotePath, localDir string) (string, error) {

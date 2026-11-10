@@ -62,6 +62,12 @@ type ScreenLayoutDefaults struct {
 	WindowTimeoutSeconds int    `json:"windowTimeoutSeconds"`
 }
 
+type ProjectionPreset struct {
+	Name     string             `json:"name"`
+	Hint     string             `json:"hint"`
+	Settings ProjectionDefaults `json:"settings"`
+}
+
 type ProjectionDefaults struct {
 	MaxFPS      int  `json:"maxFPS"`
 	MaxSize     int  `json:"maxSize"`
@@ -103,13 +109,14 @@ func ValidateProjection(p ProjectionDefaults) error {
 }
 
 type Defaults struct {
-	Projection   ProjectionDefaults   `json:"projection"`
-	ScreenLayout ScreenLayoutDefaults `json:"screenLayout"`
-	CloneCount   int                  `json:"cloneCount"`
-	Create       CreateDefaults       `json:"create"`
-	Runtime      RuntimeDefaults      `json:"runtime"`
-	Sources      Sources              `json:"sources"`
-	Images       []ImagePreset        `json:"images"`
+	ProjectionPresets []ProjectionPreset   `json:"projectionPresets"`
+	Projection        ProjectionDefaults   `json:"projection"`
+	ScreenLayout      ScreenLayoutDefaults `json:"screenLayout"`
+	CloneCount        int                  `json:"cloneCount"`
+	Create            CreateDefaults       `json:"create"`
+	Runtime           RuntimeDefaults      `json:"runtime"`
+	Sources           Sources              `json:"sources"`
+	Images            []ImagePreset        `json:"images"`
 }
 
 func decode(raw []byte, d *Defaults) error {
@@ -136,6 +143,14 @@ func decode(raw []byte, d *Defaults) error {
 	}
 	if err := ValidateProjection(d.Projection); err != nil {
 		return err
+	}
+	for _, p := range d.ProjectionPresets {
+		if p.Name == "" {
+			return errors.New("投屏预设名称不能为空")
+		}
+		if err := ValidateProjection(p.Settings); err != nil {
+			return err
+		}
 	}
 	layout := d.ScreenLayout
 	if layout.Size != "auto" && layout.Size != "small" && layout.Size != "medium" && layout.Size != "large" {

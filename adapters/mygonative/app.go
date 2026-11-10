@@ -62,6 +62,7 @@ func Run(svc service.Service) error {
 type viewModel struct {
 	projection         projectionUIState
 	settingsProjection projectionForm
+	settingsRefreshing bool
 	settingsTab        int
 	groups             groupUIState
 	transfer           transferUIState
@@ -85,11 +86,14 @@ type viewModel struct {
 	dlProgress service.DownloadProgress
 
 	// Tasks and the instances they currently hold.
-	tasks      []*task
-	nextTaskID int
-	busy       map[string]string // instance ID -> title of the task running on it
-	tasksOpen  bool
-	panelTab   int
+	tasks         []*task
+	nextTaskID    int
+	busy          map[string]string // instance ID -> title of the task running on it
+	startingSince map[string]time.Time
+	tasksOpen     bool
+	panelTab      int
+	copiedText    string
+	copyText      func(string)
 
 	// List state.
 	tableState ui.ListState
@@ -111,6 +115,7 @@ type viewModel struct {
 	createRes      string
 	createProxy    string
 	createHeadless bool
+	createGroupID  string
 
 	showEdit     bool
 	editID       string
@@ -123,9 +128,10 @@ type viewModel struct {
 	editError    string
 
 	// Clone modal.
-	showClone  bool
-	cloneSrcID string
-	cloneCount float64
+	showClone    bool
+	cloneSrcID   string
+	cloneCount   float64
+	cloneGroupID string
 
 	// Proxy modal. Targets are fixed when the modal opens so the form never
 	// inherits values from an earlier dialog or a changed selection.
@@ -197,6 +203,7 @@ func newViewModel(svc service.Service) *viewModel {
 	vm := &viewModel{
 		svc:                svc,
 		busy:               map[string]string{},
+		startingSince:      map[string]time.Time{},
 		lastRow:            -1,
 		prevTab:            0,
 		catalog:            cat,
@@ -267,6 +274,17 @@ func formatDownloadStage(stage string) string {
 
 func (vm *viewModel) bindWindow(win *mygo.Window) {
 	vm.win = win
+
+	// Keep elapsed boot timers fresh while any instance is in Starting state.
+	go func() {
+		ticker := time.NewTicker(time.Second)
+		defer ticker.Stop()
+		for range ticker.C {
+			win.Update(func() {
+				_ = vm.syncStartingTimers()
+			})
+		}
+	}()
 
 	// Subscribe to core service events and push updates onto the UI thread.
 	evCh, _ := vm.svc.Subscribe()
@@ -357,6 +375,56 @@ func (vm *viewModel) appendLog(line string) {
 	if len(vm.logs) > 500 {
 		vm.logs = vm.logs[len(vm.logs)-500:]
 	}
+}
+
+func (vm *viewModel) writeClipboard(text string) {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return
+	}
+	vm.copiedText = text
+	if vm.copyText != nil {
+		vm.copyText(text)
+		return
+	}
+	if vm.win != nil {
+		mygo.Clipboard.WriteText(text)
+	}
+}
+
+func (vm *viewModel) syncStartingTimers() bool {
+	if vm.startingSince == nil {
+		vm.startingSince = map[string]time.Time{}
+	}
+	hasStarting := false
+	active := map[string]bool{}
+	now := time.Now()
+	for _, inst := range vm.instances {
+		if inst.State == service.Starting {
+			hasStarting = true
+			active[inst.ID] = true
+			if _, ok := vm.startingSince[inst.ID]; !ok {
+				vm.startingSince[inst.ID] = now
+			}
+		}
+	}
+	for id := range vm.startingSince {
+		if !active[id] {
+			delete(vm.startingSince, id)
+		}
+	}
+	return hasStarting
+}
+
+func (vm *viewModel) instanceStateLabel(inst service.Instance) string {
+	if inst.State == service.Starting {
+		if since, ok := vm.startingSince[inst.ID]; ok {
+			if sec := int(time.Since(since).Seconds()); sec > 0 {
+				return fmt.Sprintf("◐ 启动中 · %ds", sec)
+			}
+		}
+	}
+	return formatStateLabel(inst.State)
 }
 
 // refreshVisible applies the status tab and search box to the instance list.
@@ -486,6 +554,7 @@ func (vm *viewModel) perform(a action, insts []service.Instance) {
 		vm.showDelete = true
 	case actClone:
 		vm.cloneSrcID = insts[0].ID
+		vm.cloneGroupID = vm.groups.snapshot.Memberships[insts[0].ID]
 		vm.showClone = true
 	}
 }
@@ -544,6 +613,7 @@ func (vm *viewModel) proxySaveReady() bool {
 
 func (vm *viewModel) view(c *ui.Context) {
 	c.SetTheme(workbenchTheme)
+	vm.syncStartingTimers()
 	vm.refreshVisible()
 	w, _ := c.Size()
 	showNav := w >= showNavAt
@@ -676,6 +746,10 @@ func (vm *viewModel) buildHeader(c *ui.Context, showNav bool) {
 		}
 		if control(c, "btn_create", "新建实例", "plus", true).Height(36).Clicked() {
 			vm.showCreate = true
+			vm.createGroupID = vm.groups.active
+			if vm.createGroupID == ungroupedFilter {
+				vm.createGroupID = ""
+			}
 		}
 	})
 }
@@ -744,9 +818,16 @@ func (vm *viewModel) buildActionBar(c *ui.Context, sel []service.Instance) {
 			if ui.Button(c.Key("bar_edit"), "编辑").Disabled(vm.busy[sel[0].ID] != "").Clicked() {
 				vm.openEdit(sel[0])
 			}
-			if ui.Button(c.Key("bar_projection_settings"), "投屏设置").Disabled(vm.busy[sel[0].ID] != "").Clicked() {
-				vm.openProjectionSettings(sel[0])
+
+		}
+		available := len(sel) > 0 && !vm.settingsRefreshing
+		for _, inst := range sel {
+			if vm.busy[inst.ID] != "" {
+				available = false
 			}
+		}
+		if ui.Button(c.Key("bar_projection_settings"), "投屏设置").Disabled(!available).Clicked() {
+			vm.openProjectionBatch(sel)
 		}
 		vm.actionButton(c, "bar", actDelete, sel, false)
 	})
@@ -846,13 +927,26 @@ func (vm *viewModel) buildInstanceTable(c *ui.Context) {
 						ui.Column(c).Width(32).Height(38).Radius(7).Background(bg).Center().Children(func() { glyph(c, "device", 19).TextColor(color) })
 						ui.Column(c).Gap(6).Grow(1).Children(func() {
 							ui.Text(c, it.Name).FontSize(13).FontWeight(600).SingleLine().TextColor(t.Text)
-							ui.Text(c, shortImage(it.SystemImage)).FontSize(10).TextColor(t.TextMuted).SingleLine()
+							ui.Row(c).Gap(6).Children(func() {
+								if vm.groups.active == "" && vm.groups.snapshot.Memberships[it.ID] != "" {
+									ui.Text(c, vm.instanceGroupName(it.ID)).FontSize(10).TextColor(t.Accent).SingleLine().Shrink(0)
+									ui.Text(c, "·").FontSize(10).TextColor(t.TextMuted).Shrink(0)
+								}
+								ui.Text(c, shortImage(it.SystemImage)).FontSize(10).TextColor(t.TextMuted).SingleLine()
+							})
 						})
 					})
 					ui.Column(c).Width(104).Gap(4).Children(func() {
-						ui.Text(c, formatStateLabel(it.State)).FontSize(11).TextColor(stateColor(t, it.State)).SingleLine()
+						stateEl := ui.Text(c, vm.instanceStateLabel(it)).FontSize(11).TextColor(stateColor(t, it.State)).SingleLine()
+						if it.LastError != "" {
+							stateEl.Tooltip(it.LastError)
+						}
 						if op := vm.busy[it.ID]; op != "" {
 							ui.Text(c, op+"中").FontSize(10).TextColor(t.TextMuted).SingleLine()
+						} else if it.State == service.Starting {
+							ui.Text(c, "等待桌面就绪").FontSize(10).TextColor(t.TextMuted).SingleLine()
+						} else if it.State == service.Failed && it.LastError != "" {
+							ui.Text(c, oneLine(it.LastError)).Tooltip(it.LastError).FontSize(10).TextColor(t.Danger).SingleLine()
 						}
 					})
 					ui.Column(c).Width(140).Gap(6).Children(func() {
@@ -910,8 +1004,17 @@ func (vm *viewModel) buildDetailBody(c *ui.Context, inst service.Instance) {
 		}
 	})
 	ui.Text(c, inst.Name).FontSize(23).FontWeight(600)
-	ui.Text(c, formatStateLabel(inst.State)).FontSize(12).TextColor(stateColor(t, inst.State))
-	ui.Text(c, shortImage(inst.SystemImage)).FontSize(10).TextColor(t.TextMuted)
+	ui.Row(c).Gap(6).Children(func() {
+		stateEl := ui.Text(c, vm.instanceStateLabel(inst)).FontSize(12).TextColor(stateColor(t, inst.State))
+		if inst.LastError != "" {
+			stateEl.Tooltip(inst.LastError)
+		}
+		ui.Text(c, "·").FontSize(12).TextColor(t.TextMuted)
+		vm.buildGroupDetail(c, inst)
+	})
+	if inst.State == service.Starting {
+		ui.Text(c, "正在引导 Android 系统，等待桌面就绪…").FontSize(11).TextColor(t.TextMuted)
+	}
 	if op := vm.busy[inst.ID]; op != "" {
 		ui.Row(c).Gap(6).Children(func() {
 			ui.Spinner(c)
@@ -922,7 +1025,8 @@ func (vm *viewModel) buildDetailBody(c *ui.Context, inst service.Instance) {
 	ui.Row(c).Gap(6).Wrap().Margin(6, 0, 0, 0).Children(func() {
 		if inst.State == service.Running || inst.State == service.Starting || (inst.State == service.Failed && inst.Port > 0) {
 			vm.actionButton(c, "det", actScreen, one, true).Grow(1)
-			vm.actionButton(c, "det", actStop, one, false)
+			vm.buildDetailAudioButton(c, inst)
+			vm.actionButton(c, "det", actStop, one, false).TextColor(t.Danger).BorderColor(t.Danger)
 		} else {
 			vm.actionButton(c, "det", actStart, one, true).Grow(1)
 		}
@@ -942,6 +1046,18 @@ func (vm *viewModel) buildDetailBody(c *ui.Context, inst service.Instance) {
 		}
 	}).FontSize(11).Height(28).AlignSelf(ui.Start)
 
+	if inst.LastError != "" {
+		ui.Divider(c)
+		ui.Row(c).Children(func() {
+			ui.Text(c, "最近错误").FontSize(12).Bold().TextColor(t.Danger)
+			ui.Spacer(c)
+			if quietControl(c, "copy_last_error", "复制错误", "copy").Height(26).Padding(4, 8).FontSize(11).Clicked() {
+				vm.writeClipboard(inst.LastError)
+			}
+		})
+		ui.Text(c, inst.LastError).FontSize(11).TextColor(t.TextMuted)
+	}
+
 	ui.Divider(c)
 	ui.Text(c, "设备配置").FontSize(12).Bold().Margin(8, 0, 4, 0)
 	kv(c, "系统镜像", shortImage(inst.SystemImage))
@@ -951,6 +1067,7 @@ func (vm *viewModel) buildDetailBody(c *ui.Context, inst service.Instance) {
 		mode = "后台运行（无窗口）"
 	}
 	kv(c, "显示模式", mode)
+	kv(c, "投屏配置", vm.detailProjectionSummary(inst))
 	if inst.State == service.Running || inst.State == service.Starting {
 		ui.Text(c, "以上为已保存配置；内存、CPU 和运行模式的修改在下次启动生效。").FontSize(11).TextColor(t.TextMuted)
 	}
@@ -1004,12 +1121,6 @@ func (vm *viewModel) buildDetailBody(c *ui.Context, inst service.Instance) {
 	}
 	if shown == 0 {
 		ui.Text(c, "暂无操作记录").FontSize(11).TextColor(t.TextMuted)
-	}
-
-	if inst.LastError != "" {
-		ui.Divider(c)
-		ui.Text(c, "最近错误").FontSize(12).Bold().TextColor(t.Danger)
-		ui.Text(c, inst.LastError).FontSize(11).TextColor(t.TextMuted)
 	}
 }
 
@@ -1066,7 +1177,7 @@ func (vm *viewModel) buildTaskDock(c *ui.Context) {
 							vm.retryFailed(lt)
 						}
 					}
-					if !compact && ui.Button(c.Key("dock_why"), "查看失败原因").Clicked() {
+					if ui.Button(c.Key("dock_why"), "查看失败原因").Clicked() {
 						vm.tasksOpen, vm.panelTab = true, 0
 					}
 				}
@@ -1090,9 +1201,14 @@ func (vm *viewModel) buildTaskPanel(c *ui.Context) {
 			ui.Tabs(c, &vm.panelTab, "任务", "运行日志")
 			ui.Spacer(c)
 			if vm.panelTab == 1 {
-				if ui.Button(c.Key("clear_log"), "清空日志").Disabled(len(vm.logs) == 0).Clicked() {
-					vm.logs = nil
-				}
+				ui.Row(c).Gap(6).Children(func() {
+					if ui.Button(c.Key("copy_log"), "复制日志").Disabled(len(vm.logs) == 0).Clicked() {
+						vm.writeClipboard(strings.Join(vm.logs, "\n"))
+					}
+					if ui.Button(c.Key("clear_log"), "清空日志").Disabled(len(vm.logs) == 0).Clicked() {
+						vm.logs = nil
+					}
+				})
 			}
 		})
 		ui.Divider(c)
@@ -1161,7 +1277,7 @@ func (vm *viewModel) buildCreateModal(c *ui.Context) {
 		t := c.Theme()
 		modalContent(c, 560).Gap(12).Children(func() {
 			ui.Text(c, "新建干净安卓实例").FontSize(16).Bold()
-			ui.Text(c, "纯 Go 零 Java 引擎直接生成独立 config.ini，首次启动自动初始化独立 userdata 与加密密钥，彻底隔离设备指纹与 GSF ID。").
+			ui.Text(c, "每台实例拥有独立应用、账号和数据。先选择归属与系统镜像，再调整设备配置。").
 				FontSize(12).TextColor(t.TextMuted)
 
 			options := imageChoices(vm.env, vm.catalog...)
@@ -1170,36 +1286,40 @@ func (vm *viewModel) buildCreateModal(c *ui.Context) {
 			}
 			imgInstalled := imageInstalled(vm.env, vm.createImage)
 
-			ui.Form(c, func() {
-				ui.Field(c, "实例名称 / 批量前缀", func() {
-					ui.TextInput(c, &vm.createName).Placeholder("例如 工作账号")
+			_, modalHeight := c.Size()
+			ui.Scroll(c.Key("create_fields")).Height(min(float32(420), max(float32(130), modalHeight-270))).Children(func() {
+				ui.Form(c, func() {
+					ui.Field(c, "所属分组", func() { vm.groupPicker(c, "create_group", &vm.createGroupID) })
+					ui.Field(c, "实例名称 / 批量前缀", func() {
+						ui.TextInput(c, &vm.createName).Placeholder("例如 工作账号")
+					})
+					ui.Field(c, "创建数量", func() {
+						ui.NumberInput(c, &vm.createCount, 1, 32, 1)
+					})
+					ui.Field(c, "系统镜像", func() {
+						selectedLabel := imageChoiceLabel(vm.env, vm.createImage)
+						ui.Combobox(c, &selectedLabel, options).Label("系统镜像选择").Placeholder("选择或输入 system-images;...")
+						// Decoration is presentation only; service calls always receive the package ID.
+						vm.createImage = strings.TrimPrefix(selectedLabel, installedImagePrefix)
+					}).Description("已安装的镜像排在前面；Gmail / WhatsApp 推荐选用 google_apis_playstore 镜像")
+					ui.Field(c, "分辨率", func() {
+						ui.Combobox(c, &vm.createRes, resolutionOptions)
+					})
+					ui.Field(c, "内存 (MB)", func() {
+						ui.NumberInput(c, &vm.createMemMB, 1024, 16384, 512)
+					})
+					ui.Field(c, "CPU 核数", func() {
+						ui.NumberInput(c, &vm.createCores, 1, 8, 1)
+					})
+					ui.Field(c, "HTTP 代理", func() {
+						ui.TextInput(c, &vm.createProxy).Placeholder("可选，如 http://127.0.0.1:7890")
+					})
+					ui.Field(c, "运行模式", func() {
+						ui.Checkbox(c, &vm.createHeadless, "默认无头运行 (-no-window -no-snapshot)，需要看画面时用 scrcpy 投屏")
+					})
 				})
-				ui.Field(c, "创建数量", func() {
-					ui.NumberInput(c, &vm.createCount, 1, 32, 1)
-				})
-				ui.Field(c, "系统镜像", func() {
-					selectedLabel := imageChoiceLabel(vm.env, vm.createImage)
-					ui.Combobox(c, &selectedLabel, options).Label("系统镜像选择").Placeholder("选择或输入 system-images;...")
-					// Decoration is presentation only; service calls always receive the package ID.
-					vm.createImage = strings.TrimPrefix(selectedLabel, installedImagePrefix)
-				}).Description("已安装的镜像排在前面；Gmail / WhatsApp 推荐选用 google_apis_playstore 镜像")
-				ui.Field(c, "分辨率", func() {
-					ui.Combobox(c, &vm.createRes, resolutionOptions)
-				})
-				ui.Field(c, "内存 (MB)", func() {
-					ui.NumberInput(c, &vm.createMemMB, 1024, 16384, 512)
-				})
-				ui.Field(c, "CPU 核数", func() {
-					ui.NumberInput(c, &vm.createCores, 1, 8, 1)
-				})
-				ui.Field(c, "HTTP 代理", func() {
-					ui.TextInput(c, &vm.createProxy).Placeholder("可选，如 http://127.0.0.1:7890")
-				})
-				ui.Field(c, "运行模式", func() {
-					ui.Checkbox(c, &vm.createHeadless, "默认无头运行 (-no-window -no-snapshot)，需要看画面时用 scrcpy 投屏")
-				})
-			})
 
+			})
 			if vm.envLoaded {
 				if imgInstalled {
 					ui.Text(c, "✓ 该镜像已安装就绪，可直接创建实例").FontSize(12).TextColor(t.Success)
@@ -1239,10 +1359,19 @@ func (vm *viewModel) buildCreateModal(c *ui.Context) {
 					}
 					vm.showCreate = false
 					name := fmt.Sprintf("%s ×%d", strings.TrimSpace(spec.NamePrefix), spec.Count)
+					groupID := vm.createGroupID
 					vm.startTask("创建实例", actCreate, []target{{name: name}}, false, func(ctx context.Context, _ target) error {
-						_, err := vm.svc.Create(ctx, spec)
+						created, err := vm.svc.Create(ctx, spec)
+						if len(created) > 0 && groupID != "" {
+							if e := vm.svc.AssignGroup(ctx, idsOf(created), groupID); e != nil {
+								if err != nil {
+									return fmt.Errorf("创建出现错误：%v；已创建实例归组失败：%w", err, e)
+								}
+								return fmt.Errorf("实例已创建，但归组失败（保留在未分组）：%w", e)
+							}
+						}
 						return err
-					}, nil)
+					}, func(*task) { vm.refreshGroups(); vm.refreshVisible() })
 				}
 			})
 		})
@@ -1264,6 +1393,9 @@ func (vm *viewModel) buildCloneModal(c *ui.Context) {
 				ui.Field(c, "克隆数量", func() {
 					ui.NumberInput(c, &vm.cloneCount, 1, 20, 1)
 				})
+				ui.Field(c, "所属分组", func() {
+					vm.groupPicker(c, "clone_group", &vm.cloneGroupID)
+				})
 			})
 
 			ui.Row(c).Gap(8).Children(func() {
@@ -1272,13 +1404,21 @@ func (vm *viewModel) buildCloneModal(c *ui.Context) {
 					vm.showClone = false
 				}
 				if ui.PrimaryButton(c.Key("confirm_clone"), "开始克隆").Clicked() {
-					srcID, cnt := vm.cloneSrcID, int(vm.cloneCount)
+					srcID, cnt, groupID := vm.cloneSrcID, int(vm.cloneCount), vm.cloneGroupID
 					vm.showClone = false
 					if inst, ok := vm.findInstance(srcID); ok {
 						vm.startTask("克隆", actClone, targetsOf([]service.Instance{inst}), true, func(ctx context.Context, t target) error {
-							_, err := vm.svc.Clone(ctx, t.id, cnt)
+							cloned, err := vm.svc.Clone(ctx, t.id, cnt)
+							if len(cloned) > 0 && groupID != "" {
+								if e := vm.svc.AssignGroup(ctx, idsOf(cloned), groupID); e != nil {
+									if err != nil {
+										return fmt.Errorf("克隆出现错误：%v；已克隆实例归组失败：%w", err, e)
+									}
+									return fmt.Errorf("实例已克隆，但归组失败（保留在未分组）：%w", e)
+								}
+							}
 							return err
-						}, nil)
+						}, func(*task) { vm.refreshGroups(); vm.refreshVisible() })
 					}
 				}
 			})
@@ -1884,7 +2024,7 @@ func (vm *viewModel) buildDirectoryRow(c *ui.Context, label, path string) {
 	})
 }
 
-func (vm *viewModel) saveGlobalSettings() {
+func (vm *viewModel) saveGlobalSettings() bool {
 	st := vm.svc.GetSettings()
 	st.DownloadProxy = strings.TrimSpace(vm.settingsProxy)
 	st.MaxConcurrent = int(vm.settingsConcurrent)
@@ -1892,10 +2032,12 @@ func (vm *viewModel) saveGlobalSettings() {
 	if err := vm.svc.UpdateSettings(st); err != nil {
 		vm.settingsSavedHint = "保存失败：" + err.Error()
 		vm.appendLog(vm.settingsSavedHint)
+		return false
 	} else {
 		vm.settingsSavedHint = "✓ 已保存；投屏参数在新开或重新投屏时生效。"
 		vm.appendLog("全局设置已保存")
 	}
+	return true
 }
 func (vm *viewModel) buildSettingsTab(c *ui.Context) {
 	t := c.Theme()
@@ -1906,13 +2048,14 @@ func (vm *viewModel) buildSettingsTab(c *ui.Context) {
 				ui.Field(c, "最大运行实例数", func() { ui.NumberInput(c, &vm.settingsConcurrent, 1, 16, 1) }).Description("限制同时运行的实例数量，避免占用过多内存。")
 			})
 		} else {
-			buildProjectionFields(c, &vm.settingsProjection, false)
+			buildProjectionPresets(c, &vm.settingsProjection, vm.settingsRefreshing, false, nil)
+			buildProjectionFields(c, &vm.settingsProjection, vm.settingsRefreshing)
 			ui.Text(c, "默认所有实例跟随此设置；单实例可在「投屏设置」中覆盖。").FontSize(12).TextColor(t.TextMuted)
 		}
 		if vm.settingsSavedHint != "" {
-			color := t.Success
-			if strings.HasPrefix(vm.settingsSavedHint, "保存失败") {
-				color = t.Danger
+			color := t.Warning
+			if strings.HasPrefix(vm.settingsSavedHint, "✓") {
+				color = t.Success
 			}
 			ui.Text(c, vm.settingsSavedHint).FontSize(12).TextColor(color)
 		}

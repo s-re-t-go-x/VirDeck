@@ -2,8 +2,10 @@ package mygonative
 
 import (
 	"context"
+	"fmt"
 	"github.com/egoist/mygo/ui"
 	"testing"
+	"time"
 	"virdeck/core/service"
 )
 
@@ -171,6 +173,221 @@ func TestProjectionFieldsStopAtUpperLimits(t *testing.T) {
 			}
 			if got := tc.value(&p); got != tc.want {
 				t.Fatalf("increment reached %v, want upper limit %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestProjectionPresetFillsVideoAndPreservesAudio(t *testing.T) {
+	vm := newTestVM(t)
+	vm.openSettings()
+	vm.settingsTab = 1
+	vm.settingsProjection.audio = true
+	tester := ui.NewTester(vm.view, 610, 780)
+	tester.Frame()
+	if err := tester.Click("省资源多开"); err != nil {
+		t.Fatal(err)
+	}
+	if got := vm.settingsProjection.values(); got != (service.ProjectionSettings{MaxFPS: 15, MaxSize: 960, BitRateMbps: 2, Audio: true}) {
+		t.Fatalf("preset %+v", got)
+	}
+}
+
+func TestBatchProjectionSettingsReachableForMixedStates(t *testing.T) {
+	vm := newTestVM(t)
+	vm.svc = &projectionTestSvc{Service: vm.svc, p: service.ProjectionSettings{MaxFPS: 60, MaxSize: 1280, BitRateMbps: 8}}
+	vm.selected.Add(vm.instances[0].ID)
+	vm.selected.Add(vm.instances[1].ID)
+	tester := ui.NewTester(vm.view, 1180, 780)
+	tester.Frame()
+	if err := tester.Click("投屏设置"); err != nil {
+		t.Fatal(err)
+	}
+	if !vm.projection.show {
+		t.Fatal("batch form not opened")
+	}
+}
+
+// Android process/window boundaries are replaced; settings persistence stays real.
+type projectionControlSvc struct {
+	service.Service
+	overrides map[string]service.ProjectionSettings
+	openIDs   []string
+	reopened  chan string
+}
+
+func (s *projectionControlSvc) GetSettings() service.Settings {
+	st := s.Service.GetSettings()
+	st.ProjectionOverrides = map[string]service.ProjectionSettings{}
+	for id, p := range s.overrides {
+		st.ProjectionOverrides[id] = p
+	}
+	return st
+}
+func (s *projectionControlSvc) GetProjectionSettings(id string) (service.ProjectionSettings, bool, error) {
+	if p, ok := s.overrides[id]; ok {
+		return p, true, nil
+	}
+	return s.Service.GetSettings().Projection, false, nil
+}
+func (s *projectionControlSvc) SetProjectionSettings(_ context.Context, id string, p *service.ProjectionSettings) error {
+	if p == nil {
+		delete(s.overrides, id)
+	} else {
+		s.overrides[id] = *p
+	}
+	return nil
+}
+func (s *projectionControlSvc) InspectScreenLayout(context.Context) (service.ScreenLayoutSnapshot, error) {
+	return service.ScreenLayoutSnapshot{OpenIDs: append([]string(nil), s.openIDs...)}, nil
+}
+func (s *projectionControlSvc) ReopenScreen(_ context.Context, id string) error {
+	s.reopened <- id
+	return nil
+}
+func drainProjectionTask(t *testing.T, vm *viewModel, posts chan func()) {
+	t.Helper()
+	deadline := time.After(3 * time.Second)
+	for {
+		busy := vm.settingsRefreshing
+		for _, task := range vm.tasks {
+			if !task.finished {
+				busy = true
+			}
+		}
+		if !busy {
+			return
+		}
+		select {
+		case f := <-posts:
+			f()
+		case <-deadline:
+			t.Fatal("projection task stalled")
+		}
+	}
+}
+func TestGlobalReopenOnlyTouchesOpenFollowingInstances(t *testing.T) {
+	vm := newTestVM(t)
+	svc := &projectionControlSvc{Service: vm.svc, overrides: map[string]service.ProjectionSettings{vm.instances[2].ID: {MaxFPS: 15, MaxSize: 960, BitRateMbps: 2}}, openIDs: []string{vm.instances[0].ID, vm.instances[2].ID}, reopened: make(chan string, 4)}
+	vm.svc = svc
+	posts := make(chan func(), 32)
+	vm.post = func(f func()) { posts <- f }
+	vm.openSettings()
+	vm.settingsProjection.fps = 30
+	vm.saveGlobalAndReopen()
+	drainProjectionTask(t, vm, posts)
+	if len(svc.reopened) != 1 {
+		t.Fatalf("reopened %d windows", len(svc.reopened))
+	}
+	if id := <-svc.reopened; id != "a1b2c3d4" {
+		t.Fatalf("reopened custom/closed window %s", id)
+	}
+	if vm.svc.GetSettings().Projection.MaxFPS != 30 {
+		t.Fatal("global values not saved before reopen")
+	}
+}
+func TestAudioShortcutPreservesVideoAndDoesNotOpenClosedProjection(t *testing.T) {
+	for _, open := range []bool{false, true} {
+		t.Run(fmt.Sprint(open), func(t *testing.T) {
+			vm := newTestVM(t)
+			p := service.ProjectionSettings{MaxFPS: 15, MaxSize: 960, BitRateMbps: 2}
+			svc := &projectionControlSvc{Service: vm.svc, overrides: map[string]service.ProjectionSettings{vm.instances[0].ID: p}, reopened: make(chan string, 4)}
+			if open {
+				svc.openIDs = []string{vm.instances[0].ID}
+			}
+			vm.svc = svc
+			posts := make(chan func(), 32)
+			vm.post = func(f func()) { posts <- f }
+			vm.toggleProjectionAudio(vm.instances[0])
+			drainProjectionTask(t, vm, posts)
+			got, custom, _ := svc.GetProjectionSettings(vm.instances[0].ID)
+			p.Audio = true
+			if got != p || !custom {
+				t.Fatalf("sound changed video parameters %+v", got)
+			}
+			want := 0
+			if open {
+				want = 1
+			}
+			if len(svc.reopened) != want {
+				t.Fatalf("reopen count=%d want=%d", len(svc.reopened), want)
+			}
+		})
+	}
+}
+func TestBatchProjectionSavesAndRestoresInheritanceForFrozenTargets(t *testing.T) {
+	vm := newTestVM(t)
+	svc := &projectionControlSvc{Service: vm.svc, overrides: map[string]service.ProjectionSettings{}, reopened: make(chan string, 4)}
+	vm.svc = svc
+	vm.openProjectionBatch(vm.instances[:2])
+	vm.selected.Clear()
+	vm.selected.Add(vm.instances[2].ID)
+	vm.projection.inherit = false
+	vm.projection.form = projectionForm{fps: 15, size: 960, rate: 2, audio: true}
+	vm.saveInstanceProjection(false)
+	if len(svc.overrides) != 2 {
+		t.Fatalf("batch saved %d overrides", len(svc.overrides))
+	}
+	if _, ok := svc.overrides[vm.instances[2].ID]; ok {
+		t.Fatal("selection drift changed target")
+	}
+	vm.projection.inherit = true
+	vm.saveInstanceProjection(false)
+	if len(svc.overrides) != 0 {
+		t.Fatal("batch did not restore inheritance")
+	}
+}
+
+func TestAudioShortcutRestoresInheritanceWhenMatchingGlobal(t *testing.T) {
+	vm := newTestVM(t)
+	svc := &projectionControlSvc{Service: vm.svc, overrides: map[string]service.ProjectionSettings{}, reopened: make(chan string, 4)}
+	vm.svc = svc
+	posts := make(chan func(), 32)
+	vm.post = func(f func()) { posts <- f }
+
+	vm.toggleProjectionAudio(vm.instances[0])
+	drainProjectionTask(t, vm, posts)
+	got, custom, _ := svc.GetProjectionSettings(vm.instances[0].ID)
+	if !custom || !got.Audio {
+		t.Fatalf("first toggle should create audio override, got %+v custom=%v", got, custom)
+	}
+
+	vm.toggleProjectionAudio(vm.instances[0])
+	drainProjectionTask(t, vm, posts)
+	got, custom, _ = svc.GetProjectionSettings(vm.instances[0].ID)
+	if custom || got.Audio {
+		t.Fatalf("second toggle should restore global inheritance, got %+v custom=%v", got, custom)
+	}
+}
+
+func TestDetailAudioVisibilityFollowsStartedActions(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		state   service.State
+		port    int
+		visible bool
+	}{
+		{"stopped", service.Stopped, 0, false},
+		{"failed without process", service.Failed, 0, false},
+		{"starting", service.Starting, 5554, true},
+		{"running", service.Running, 5554, true},
+		{"failed with process", service.Failed, 5554, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			vm := newTestVM(t)
+			vm.svc = &projectionTestSvc{Service: vm.svc, p: service.ProjectionSettings{MaxFPS: 60, MaxSize: 1280, BitRateMbps: 8}}
+			inst := vm.instances[0]
+			inst.State = tc.state
+			inst.Port = tc.port
+			tester := ui.NewTester(func(c *ui.Context) {
+				c.SetTheme(workbenchTheme)
+				ui.Column(c).Width(detailWidth).Children(func() { vm.buildDetailBody(c, inst) })
+			}, 320, 780)
+			tester.Frame()
+			_, hasAudio := tester.Find("开启声音")
+			_, hasStop := tester.Find("停止")
+			if hasAudio != tc.visible || hasStop != tc.visible {
+				t.Fatalf("audio=%v stop=%v want=%v", hasAudio, hasStop, tc.visible)
 			}
 		})
 	}
