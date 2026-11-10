@@ -83,6 +83,12 @@ scripts/icongen/          # 纯 Go 图标 (.ico) 与 Windows 版本资源 (.syso
 - **[`config/defaults.json`](../config/defaults.json)**：**仅供开发阶段集中调整默认参数**，编译时通过 `go:embed` 嵌入可执行文件并在启动时严格校验字段合法性；程序运行时**绝不读取外部 `defaults.json`**。
 - **`VirDeckData/config/*.json`**：运行时唯一读写的用户配置目录。首次启动自动初始化 `settings.json`、`instances.json`、`images_catalog.json`，后续升级或重启均保留用户已有配置、实例与收藏。
 
+### 默认收藏的增量初始化
+
+镜像预设的 `favoriteVersion` 表示首次提供该默认收藏的版本，目录文件中的 `favoritesVersion` 记录已应用版本。原始 Android 11 收藏属于版本 1，本轮新增收藏属于版本 2；后续新增默认收藏使用更高版本号。
+
+首次运行加载全部默认收藏；已有目录只补充更高版本且 `favorite: true` 的条目，保留已有备注和收藏，不自动取消任何收藏。未带版本标记的旧目录视为已应用版本 1，因此不会恢复用户取消的 Android 11 收藏。迁移完成后保存标记，之后取消收藏或清空备注不会被重启覆盖。
+
 ### 2. 编译与资源生成命令
 修改 [`assets/product.json`](../assets/product.json) 或图标后，先更新资源再编译：
 

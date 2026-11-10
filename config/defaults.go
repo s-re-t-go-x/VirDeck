@@ -43,14 +43,17 @@ type Sources struct {
 	Scrcpy        string `json:"scrcpy"`
 }
 type ImagePreset struct {
-	ID       string `json:"id"`
-	Name     string `json:"name"`
-	APILevel string `json:"apiLevel"`
-	TagID    string `json:"tagId"`
-	ABI      string `json:"abi"`
-	URL      string `json:"url"`
-	Favorite bool   `json:"favorite"`
-	Note     string `json:"note"`
+	// FavoriteVersion identifies the release that first seeded this default favorite.
+	FavoriteVersion int    `json:"favoriteVersion,omitempty"`
+	SHA1            string `json:"sha1,omitempty"`
+	ID              string `json:"id"`
+	Name            string `json:"name"`
+	APILevel        string `json:"apiLevel"`
+	TagID           string `json:"tagId"`
+	ABI             string `json:"abi"`
+	URL             string `json:"url"`
+	Favorite        bool   `json:"favorite"`
+	Note            string `json:"note"`
 }
 type ScreenLayoutDefaults struct {
 	AutoFill             bool   `json:"autoFill"`

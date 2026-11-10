@@ -38,7 +38,32 @@
       "abi": "x86_64",
       "url": "",
       "favorite": true,
-      "note": "Gmail / Facebook / WhatsApp / Instagram / Chrome 首选"
+      "note": "日常多开首选；Facebook / WhatsApp / Instagram 兼容",
+      "favoriteVersion": 1
+    },
+    {
+      "id": "system-images;android-28;google_apis_playstore;x86_64",
+      "name": "Android 9 (API 28) - Google Play 商店 · 64 位",
+      "apiLevel": "28",
+      "tagId": "google_apis_playstore",
+      "abi": "x86_64",
+      "url": "https://dl.google.com/android/repository/sys-img/google_apis_playstore/x86_64-28_r08.zip",
+      "sha1": "a767da996fdea7a1f5632a9206fa5c009d6e580c",
+      "favorite": true,
+      "note": "Pie 兼容性，蓝叠常用；不支持投屏声音",
+      "favoriteVersion": 2
+    },
+    {
+      "id": "system-images;android-25;google_apis_playstore;x86",
+      "name": "Android 7.1 (API 25) - Google Play 商店 · 32 位",
+      "apiLevel": "25",
+      "tagId": "google_apis_playstore",
+      "abi": "x86",
+      "url": "https://dl.google.com/android/repository/sys-img/google_apis_playstore/x86-25_r09.zip",
+      "sha1": "6f6668954f7fd52f896fe7528aa122028c9b026c",
+      "favorite": true,
+      "note": "旧版 32 位 x86 应用兼容；不支持投屏声音",
+      "favoriteVersion": 2
     },
     {
       "id": "system-images;android-34;google_apis_playstore;x86_64",

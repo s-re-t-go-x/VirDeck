@@ -51,9 +51,10 @@ type favorite struct {
 }
 
 type persistedCatalog struct {
-	Favorites map[string]favorite `json:"favorites"`
-	Official  []ImageItem         `json:"official,omitempty"`
-	Custom    []ImageItem         `json:"custom,omitempty"`
+	FavoritesVersion int                 `json:"favoritesVersion,omitempty"`
+	Favorites        map[string]favorite `json:"favorites"`
+	Official         []ImageItem         `json:"official,omitempty"`
+	Custom           []ImageItem         `json:"custom,omitempty"`
 }
 
 // Store manages the three-tier system image catalog:
@@ -71,7 +72,7 @@ type Store struct {
 func BuiltinRecommended() []ImageItem {
 	var out []ImageItem
 	for _, p := range config.Values.Images {
-		out = append(out, ImageItem{ID: p.ID, Name: p.Name, APILevel: p.APILevel, TagID: p.TagID, ABI: p.ABI, URL: p.URL, Source: SourceRecommended})
+		out = append(out, ImageItem{ID: p.ID, Name: p.Name, APILevel: p.APILevel, TagID: p.TagID, ABI: p.ABI, URL: p.URL, SHA1: p.SHA1, Source: SourceRecommended})
 	}
 	return out
 }
@@ -85,13 +86,34 @@ func NewStore(filePath, sdkRoot string) (*Store, error) {
 	if err := s.load(); err != nil {
 		return nil, err
 	}
-	if s.data.Favorites == nil {
+	fresh := s.data.Favorites == nil
+	previousVersion := s.data.FavoritesVersion
+	// Legacy catalogs already applied version 1 (Android 11). Its absence may
+	// be an explicit unfavorite, so only newer defaults are eligible to seed.
+	if !fresh && previousVersion == 0 {
+		previousVersion = 1
+	}
+	if fresh {
 		s.data.Favorites = make(map[string]favorite)
-		for _, p := range config.Values.Images {
-			if p.Favorite {
-				s.data.Favorites[p.ID] = favorite{Note: p.Note}
-			}
+	}
+	nextVersion := max(1, previousVersion)
+	changed := fresh || s.data.FavoritesVersion == 0
+	for _, p := range config.Values.Images {
+		version := max(1, p.FavoriteVersion)
+		nextVersion = max(nextVersion, version)
+		if !p.Favorite || (!fresh && version <= previousVersion) {
+			continue
 		}
+		if _, exists := s.data.Favorites[p.ID]; !exists {
+			s.data.Favorites[p.ID] = favorite{Note: p.Note}
+			changed = true
+		}
+	}
+	if nextVersion > s.data.FavoritesVersion {
+		s.data.FavoritesVersion = nextVersion
+		changed = true
+	}
+	if changed {
 		if err := s.saveLocked(); err != nil {
 			return nil, err
 		}
