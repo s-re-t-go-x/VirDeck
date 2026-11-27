@@ -36,6 +36,14 @@ func init() {
 		case strings.Contains(script, "virdeck:reserve"):
 			fmt.Print("/storage/emulated/0/Download/VirDeck/transfer-abc")
 		case strings.Contains(script, "virdeck:list"):
+			if os.Getenv("VIRDECK_TRANSFER_MODE") == "list-fixture" {
+				data, err := os.ReadFile(os.Getenv("VIRDECK_TRANSFER_TREE"))
+				if err != nil {
+					os.Exit(2)
+				}
+				_, _ = os.Stdout.Write(data)
+				break
+			}
 			fmt.Print("d\x00资料 & 照片\x00f\x00it's $(touch nope).txt\x00")
 		case strings.Contains(script, "virdeck:receive-tree"):
 			if os.Getenv("VIRDECK_TRANSFER_MODE") == "tree-large" {
@@ -275,5 +283,80 @@ func TestTransferSendScansEachUploadedFile(t *testing.T) {
 	}
 	if scans != 1 {
 		t.Fatalf("media scan commands = %d, want 1", scans)
+	}
+}
+
+func TestTransferSendDeduplicatesCaseInsensitiveCollisions(t *testing.T) {
+	c, record := transferClient(t)
+	dirA := t.TempDir()
+	dirB := t.TempDir()
+	a := filepath.Join(dirA, "Photo.jpg")
+	b := filepath.Join(dirB, "photo.jpg")
+	for _, p := range []string{a, b} {
+		if err := os.WriteFile(p, []byte("img"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := c.TransferSend(context.Background(), 5554, []string{a, b}, "/sdcard/Download"); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var pushes [][]string
+	for _, line := range strings.Split(strings.TrimSpace(string(raw)), "\n") {
+		var args []string
+		_ = json.Unmarshal([]byte(line), &args)
+		if len(args) > 2 && args[2] == "push" {
+			pushes = append(pushes, args)
+		}
+	}
+	if len(pushes) != 2 {
+		t.Fatalf("expected 2 pushes, got %q", pushes)
+	}
+	if !strings.HasSuffix(pushes[0][4], "/Photo.jpg") || !strings.HasSuffix(pushes[1][4], "/photo (2).jpg") {
+		t.Fatalf("case-insensitive collision was not deduplicated: %q", pushes)
+	}
+}
+
+func TestTransferListStrictNULFraming(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		payload string
+		wantErr bool
+		wantLen int
+	}{
+		{name: "empty", payload: "", wantErr: false, wantLen: 0},
+		{name: "valid", payload: "d\x00Docs\x00f\x00note.txt\x00", wantErr: false, wantLen: 2},
+		{name: "missing trailing nul", payload: "d\x00Docs\x00f\x00note.txt", wantErr: true},
+		{name: "trailing garbage", payload: "d\x00Docs\x00extra", wantErr: true},
+		{name: "dot entry", payload: "d\x00.\x00", wantErr: true},
+		{name: "dotdot entry", payload: "d\x00..\x00", wantErr: true},
+		{name: "empty name", payload: "f\x00\x00", wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c, _ := transferClient(t)
+			fixture := filepath.Join(t.TempDir(), "list")
+			if err := os.WriteFile(fixture, []byte(tc.payload), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("VIRDECK_TRANSFER_TREE", fixture)
+			t.Setenv("VIRDECK_TRANSFER_MODE", "list-fixture")
+			c.SetEnv(os.Environ())
+			entries, err := c.TransferList(context.Background(), 5554, "/sdcard/Download")
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("expected error for %q, got entries=%+v", tc.payload, entries)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if len(entries) != tc.wantLen {
+				t.Fatalf("len(entries)=%d, want %d (%+v)", len(entries), tc.wantLen, entries)
+			}
+		})
 	}
 }

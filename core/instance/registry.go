@@ -21,6 +21,13 @@ const (
 	Failed   State = "failed"
 )
 
+// RecentApp records an application recently installed or launched on an instance.
+type RecentApp struct {
+	Package    string `json:"package"`
+	Component  string `json:"component,omitempty"`
+	LastUsedAt string `json:"lastUsedAt,omitempty"`
+}
+
 // Record describes a managed Android Virtual Device (AVD).
 // Port is 0 when Stopped, and dynamically assigned from the even port pool (5554..5584) when Starting/Running.
 type Record struct {
@@ -34,11 +41,19 @@ type Record struct {
 	Proxy       string `json:"proxy,omitempty"`
 	// AppliedProxy is the proxy the running emulator process was launched with.
 	// It is empty when the instance is stopped; compare with Proxy to detect a pending restart.
-	AppliedProxy string `json:"appliedProxy,omitempty"`
-	Headless     bool   `json:"headless"`
-	State        State  `json:"state"`
-	CreatedAt    string `json:"createdAt"`
-	LastError    string `json:"lastError,omitempty"`
+	AppliedProxy  string      `json:"appliedProxy,omitempty"`
+	Headless      bool        `json:"headless"`
+	Resolution    string      `json:"resolution,omitempty"`
+	StorageGB     int         `json:"storageGB,omitempty"`
+	QuickBoot     bool        `json:"quickBoot,omitempty"`
+	ForceColdNext bool        `json:"forceColdNext,omitempty"`
+	GPUMode       string      `json:"gpuMode,omitempty"`
+	Note          string      `json:"note,omitempty"`
+	ABIList       []string    `json:"abiList,omitempty"`
+	RecentApps    []RecentApp `json:"recentApps,omitempty"`
+	State         State       `json:"state"`
+	CreatedAt     string      `json:"createdAt"`
+	LastError     string      `json:"lastError,omitempty"`
 }
 
 var ErrNotFound = errors.New("instance not found")
@@ -111,21 +126,43 @@ func (r *Registry) saveLocked() error {
 		return nil
 	}
 	dir := filepath.Dir(r.path)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("mkdir %s: %w", dir, err)
 	}
 	data, err := json.MarshalIndent(r.items, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshal registry: %w", err)
 	}
-	tmp := r.path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+	f, err := os.CreateTemp(dir, ".instances-*.tmp")
+	if err != nil {
+		return fmt.Errorf("create temp registry: %w", err)
+	}
+	tmp := f.Name()
+	cleanup := true
+	defer func() {
+		if cleanup {
+			_ = os.Remove(tmp)
+		}
+	}()
+	if err := f.Chmod(0o600); err != nil {
+		_ = f.Close()
+		return fmt.Errorf("chmod temp registry: %w", err)
+	}
+	if _, err := f.Write(data); err != nil {
+		_ = f.Close()
 		return fmt.Errorf("write temp registry: %w", err)
 	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		return fmt.Errorf("sync temp registry: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("close temp registry: %w", err)
+	}
 	if err := os.Rename(tmp, r.path); err != nil {
-		_ = os.Remove(tmp)
 		return fmt.Errorf("rename temp registry: %w", err)
 	}
+	cleanup = false
 	return nil
 }
 

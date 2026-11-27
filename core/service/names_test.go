@@ -44,13 +44,6 @@ func TestChineseNameRenameKeepsInternalAVD(t *testing.T) {
 	if err := m.Stop(ctx, inst.ID); err != nil {
 		t.Fatal(err)
 	}
-	clones, err := m.Clone(ctx, inst.ID, 1)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if clones[0].AVDName == inst.AVDName || clones[0].Name == inst.Name {
-		t.Fatal("clone reused identity")
-	}
 	if err := m.Delete(ctx, inst.ID); err != nil {
 		t.Fatal(err)
 	}

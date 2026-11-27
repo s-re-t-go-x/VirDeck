@@ -6,6 +6,7 @@ import (
 	"compress/gzip"
 	"context"
 	"crypto/sha1"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"encoding/xml"
@@ -13,7 +14,9 @@ import (
 	"fmt"
 	"golang.org/x/text/cases"
 	"golang.org/x/text/unicode/norm"
+	"hash"
 	"io"
+	"math"
 	"net/http"
 	"net/url"
 	"os"
@@ -41,6 +44,8 @@ var (
 	FallbackPlatformToolsURL = config.Values.Sources.PlatformTools
 	// FallbackScrcpyURL is the stable official fallback for scrcpy win64 release.
 	FallbackScrcpyURL = config.Values.Sources.Scrcpy
+	// FallbackScrcpyChecksum is the optional SHA-256 digest for the fallback scrcpy archive.
+	FallbackScrcpyChecksum = config.Values.Sources.ScrcpySHA256
 )
 
 // Progress describes the current status of a download/extract job.
@@ -111,6 +116,13 @@ func (c *Client) Proxy() string {
 	return c.proxyURL
 }
 
+const (
+	maxDownloadBytes       int64 = 16 << 30 // 16 GiB
+	maxArchiveEntries            = 100_000
+	maxArchiveExtractBytes int64 = 16 << 30 // 16 GiB
+	maxSymlinkTargetBytes        = 64 * 1024
+)
+
 func (c *Client) httpClient(timeout time.Duration) (*http.Client, error) {
 	tr := http.DefaultTransport.(*http.Transport).Clone()
 	tr.ResponseHeaderTimeout = c.idleTimeout
@@ -118,21 +130,41 @@ func (c *Client) httpClient(timeout time.Duration) (*http.Client, error) {
 	if proxy != "" {
 		u, err := url.Parse(proxy)
 		if err != nil {
-			return nil, fmt.Errorf("解析下载代理地址 %q 失败: %w", proxy, err)
+			return nil, fmt.Errorf("解析下载代理地址 %q 失败: %s", config.RedactProxyURL(proxy), config.RedactError(err))
 		}
 		tr.Proxy = http.ProxyURL(u)
 	}
 	return &http.Client{
 		Transport: tr,
 		Timeout:   timeout,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if len(via) >= 10 {
+				return errors.New("重定向次数过多")
+			}
+			if len(via) > 0 && strings.EqualFold(via[0].URL.Scheme, "https") && !strings.EqualFold(req.URL.Scheme, "https") {
+				return fmt.Errorf("拒绝从 HTTPS 降级重定向至 %s", req.URL.Scheme)
+			}
+			if !strings.EqualFold(req.URL.Scheme, "http") && !strings.EqualFold(req.URL.Scheme, "https") {
+				return fmt.Errorf("拒绝重定向至不受支持的协议 %s", req.URL.Scheme)
+			}
+			return nil
+		},
 	}, nil
 }
 
 // Download resumes or fetches urlStr into a verified local file inside downloadsDir.
-// If expectedSHA1 is non-empty, the completed file is strictly verified against it.
-func (c *Client) Download(ctx context.Context, targetID, name, urlStr, expectedSHA1 string, onProgress ProgressFunc) (string, error) {
+// If expectedChecksum is non-empty, the completed file is strictly verified against it (40-char SHA-1 or 64-char SHA-256).
+func (c *Client) Download(ctx context.Context, targetID, name, urlStr, expectedChecksum string, onProgress ProgressFunc) (string, error) {
+	return c.download(ctx, targetID, name, urlStr, expectedChecksum, onProgress, true)
+}
+
+func (c *Client) download(ctx context.Context, targetID, name, urlStr, expectedChecksum string, onProgress ProgressFunc, allowRangeRetry bool) (string, error) {
 	if strings.TrimSpace(urlStr) == "" {
 		return "", errors.New("下载 URL 不能为空")
+	}
+	expectedChecksum = strings.TrimSpace(expectedChecksum)
+	if err := ValidateChecksumFormat(expectedChecksum); err != nil {
+		return "", err
 	}
 	if err := os.MkdirAll(c.downloadsDir, 0o755); err != nil {
 		return "", fmt.Errorf("创建下载缓存目录失败: %w", err)
@@ -140,39 +172,31 @@ func (c *Client) Download(ctx context.Context, targetID, name, urlStr, expectedS
 
 	parsed, err := url.Parse(urlStr)
 	if err != nil {
-		return "", fmt.Errorf("无效的下载 URL: %w", err)
+		return "", fmt.Errorf("无效的下载 URL: %s", config.RedactError(err))
 	}
-	baseName := sanitizeFileName(filepath.Base(parsed.Path))
-	if baseName == "" || baseName == "." || baseName == ".." || baseName == "archive" {
-		baseName = sanitizeFileName(targetID) + ".zip"
+	scheme := strings.ToLower(parsed.Scheme)
+	if (scheme != "http" && scheme != "https") || parsed.Host == "" {
+		return "", errors.New("下载 URL 仅支持合法的 http:// 或 https:// 地址")
 	}
-	finalPath := filepath.Join(c.downloadsDir, baseName)
+	redactedURL := config.RedactProxyURL(urlStr)
+	finalPath := filepath.Join(c.downloadsDir, cacheFileName(targetID, urlStr))
 	partPath := finalPath + ".part"
 	metaPath := finalPath + ".meta"
 
-	// If the completed archive already exists and passes SHA-1, reuse it directly.
+	// Only reuse a cached archive when expectedChecksum is provided and verified.
 	if info, err := os.Stat(finalPath); err == nil && !info.IsDir() && info.Size() > 0 {
-		if expectedSHA1 == "" {
-			emit(onProgress, Progress{
-				TargetID:        targetID,
-				Name:            name,
-				Stage:           "completed",
-				DownloadedBytes: info.Size(),
-				TotalBytes:      info.Size(),
-				Percent:         100,
-			})
-			return finalPath, nil
-		}
-		if ok, _ := VerifyFileSHA1(finalPath, expectedSHA1); ok {
-			emit(onProgress, Progress{
-				TargetID:        targetID,
-				Name:            name,
-				Stage:           "completed",
-				DownloadedBytes: info.Size(),
-				TotalBytes:      info.Size(),
-				Percent:         100,
-			})
-			return finalPath, nil
+		if expectedChecksum != "" {
+			if ok, _, _, verr := VerifyFileChecksum(finalPath, expectedChecksum); verr == nil && ok {
+				emit(onProgress, Progress{
+					TargetID:        targetID,
+					Name:            name,
+					Stage:           "completed",
+					DownloadedBytes: info.Size(),
+					TotalBytes:      info.Size(),
+					Percent:         100,
+				})
+				return finalPath, nil
+			}
 		}
 		_ = os.Remove(finalPath)
 	}
@@ -182,7 +206,7 @@ func (c *Client) Download(ctx context.Context, targetID, name, urlStr, expectedS
 	if st, err := os.Stat(partPath); err == nil && !st.IsDir() {
 		offset = st.Size()
 	}
-	if meta.URL != "" && meta.URL != urlStr {
+	if offset > 0 && meta.URL != redactedURL && meta.URL != urlStr {
 		offset = 0
 		_ = os.Remove(partPath)
 		_ = os.Remove(metaPath)
@@ -198,7 +222,7 @@ func (c *Client) Download(ctx context.Context, targetID, name, urlStr, expectedS
 	defer watch.close()
 	req, err := http.NewRequestWithContext(watch.ctx, http.MethodGet, urlStr, nil)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("创建下载请求失败: %s", config.RedactError(err))
 	}
 	if offset > 0 {
 		req.Header.Set("Range", fmt.Sprintf("bytes=%d-", offset))
@@ -211,7 +235,7 @@ func (c *Client) Download(ctx context.Context, targetID, name, urlStr, expectedS
 
 	resp, err := hc.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("请求下载失败: %w", watch.reason(err))
+		return "", fmt.Errorf("请求下载失败: %s", config.RedactError(watch.reason(err)))
 	}
 	resp.Body = &downloadIdleBody{ReadCloser: resp.Body, watch: watch}
 	defer resp.Body.Close()
@@ -221,29 +245,40 @@ func (c *Client) Download(ctx context.Context, targetID, name, urlStr, expectedS
 		// Server ignored Range or started fresh; truncate .part from 0.
 		offset = 0
 	case http.StatusPartialContent:
-		// Resuming from offset.
+		if cr := strings.TrimSpace(resp.Header.Get("Content-Range")); cr != "" {
+			if !strings.HasPrefix(cr, fmt.Sprintf("bytes %d-", offset)) {
+				return "", fmt.Errorf("下载服务器返回的 Content-Range 与断点偏移不匹配: %s", cr)
+			}
+		}
 	case http.StatusRequestedRangeNotSatisfiable:
-		// .part may already be complete or out of range; restart cleanly.
-		_ = os.Remove(partPath)
-		_ = os.Remove(metaPath)
-		return c.Download(ctx, targetID, name, urlStr, expectedSHA1, onProgress)
+		if offset > 0 && allowRangeRetry {
+			// .part may already be complete or out of range; restart cleanly once.
+			_ = os.Remove(partPath)
+			_ = os.Remove(metaPath)
+			return c.download(ctx, targetID, name, urlStr, expectedChecksum, onProgress, false)
+		}
+		return "", fmt.Errorf("下载服务器返回异常状态码: %d %s", resp.StatusCode, resp.Status)
 	default:
 		return "", fmt.Errorf("下载服务器返回异常状态码: %d %s", resp.StatusCode, resp.Status)
 	}
 
 	total := resp.ContentLength
 	if total > 0 {
-		total += offset
+		if offset > math.MaxInt64-total {
+			total = math.MaxInt64
+		} else {
+			total += offset
+		}
 	} else if meta.TotalBytes > 0 {
 		total = meta.TotalBytes
 	}
 
 	newMeta := partMeta{
-		URL:          urlStr,
+		URL:          redactedURL,
 		ETag:         strings.TrimSpace(resp.Header.Get("ETag")),
 		LastModified: strings.TrimSpace(resp.Header.Get("Last-Modified")),
 		TotalBytes:   total,
-		SHA1:         expectedSHA1,
+		SHA1:         expectedChecksum,
 	}
 	_ = savePartMeta(metaPath, newMeta)
 
@@ -253,7 +288,7 @@ func (c *Client) Download(ctx context.Context, targetID, name, urlStr, expectedS
 	} else {
 		flags |= os.O_APPEND
 	}
-	outFile, err := os.OpenFile(partPath, flags, 0o644)
+	outFile, err := os.OpenFile(partPath, flags, 0o600)
 	if err != nil {
 		return "", fmt.Errorf("打开临时文件失败: %w", err)
 	}
@@ -266,6 +301,12 @@ func (c *Client) Download(ctx context.Context, targetID, name, urlStr, expectedS
 	for {
 		n, rerr := resp.Body.Read(buf)
 		if n > 0 {
+			if written+int64(n) > maxDownloadBytes {
+				_ = outFile.Close()
+				_ = os.Remove(partPath)
+				_ = os.Remove(metaPath)
+				return "", fmt.Errorf("下载文件体积超过安全上限 (%d GiB)", maxDownloadBytes>>30)
+			}
 			if _, werr := outFile.Write(buf[:n]); werr != nil {
 				_ = outFile.Close()
 				return "", fmt.Errorf("写入下载文件失败: %w", werr)
@@ -299,14 +340,14 @@ func (c *Client) Download(ctx context.Context, targetID, name, urlStr, expectedS
 				break
 			}
 			_ = outFile.Close()
-			return "", fmt.Errorf("下载中断: %w", rerr)
+			return "", fmt.Errorf("下载中断: %s", config.RedactError(rerr))
 		}
 	}
 	if err := outFile.Close(); err != nil {
 		return "", err
 	}
 
-	if expectedSHA1 != "" {
+	if expectedChecksum != "" {
 		emit(onProgress, Progress{
 			TargetID:        targetID,
 			Name:            name,
@@ -315,11 +356,16 @@ func (c *Client) Download(ctx context.Context, targetID, name, urlStr, expectedS
 			TotalBytes:      total,
 			Percent:         100,
 		})
-		ok, gotSum := VerifyFileSHA1(partPath, expectedSHA1)
+		ok, algo, gotSum, verr := VerifyFileChecksum(partPath, expectedChecksum)
+		if verr != nil {
+			_ = os.Remove(partPath)
+			_ = os.Remove(metaPath)
+			return "", verr
+		}
 		if !ok {
 			_ = os.Remove(partPath)
 			_ = os.Remove(metaPath)
-			return "", fmt.Errorf("SHA-1 校验失败: 期望 %s，实际 %s", expectedSHA1, gotSum)
+			return "", fmt.Errorf("%s 校验失败: 期望 %s，实际 %s", algo, expectedChecksum, gotSum)
 		}
 	}
 
@@ -329,6 +375,67 @@ func (c *Client) Download(ctx context.Context, targetID, name, urlStr, expectedS
 	}
 	_ = os.Remove(metaPath)
 	return finalPath, nil
+}
+
+func cacheFileName(targetID, urlStr string) string {
+	var rawPath string
+	if parsed, err := url.Parse(urlStr); err == nil {
+		rawPath = parsed.Path
+	}
+	baseName := sanitizeFileName(path.Base(rawPath))
+	if baseName == "" || baseName == "." || baseName == ".." || baseName == "archive" {
+		baseName = sanitizeFileName(targetID) + ".zip"
+	}
+	sum := sha256.Sum256([]byte(config.RedactProxyURL(urlStr)))
+	return hex.EncodeToString(sum[:4]) + "_" + baseName
+}
+
+// ValidateChecksumFormat checks that expectedHex is either empty, 40-char hex (SHA-1), or 64-char hex (SHA-256).
+func ValidateChecksumFormat(expectedHex string) error {
+	s := strings.TrimSpace(expectedHex)
+	if s == "" {
+		return nil
+	}
+	if len(s) != 40 && len(s) != 64 {
+		return errors.New("校验和格式无效（需为 40 位 SHA-1 或 64 位 SHA-256 十六进制）")
+	}
+	if _, err := hex.DecodeString(s); err != nil {
+		return errors.New("校验和格式无效（需为 40 位 SHA-1 或 64 位 SHA-256 十六进制）")
+	}
+	return nil
+}
+
+// VerifyFileChecksum verifies filePath using SHA-256 (64 hex chars) or SHA-1 (40 hex chars).
+// Empty expectedHex returns (true, "", "", nil).
+func VerifyFileChecksum(filePath, expectedHex string) (ok bool, algo string, got string, err error) {
+	expectedHex = strings.TrimSpace(expectedHex)
+	if expectedHex == "" {
+		return true, "", "", nil
+	}
+	if err := ValidateChecksumFormat(expectedHex); err != nil {
+		return false, "", "", err
+	}
+
+	var h hash.Hash
+	if len(expectedHex) == 64 {
+		h = sha256.New()
+		algo = "SHA-256"
+	} else {
+		h = sha1.New()
+		algo = "SHA-1"
+	}
+
+	f, err := os.Open(filePath)
+	if err != nil {
+		return false, algo, "", err
+	}
+	defer f.Close()
+
+	if _, err := io.Copy(h, f); err != nil {
+		return false, algo, "", err
+	}
+	got = hex.EncodeToString(h.Sum(nil))
+	return strings.EqualFold(got, expectedHex), algo, got, nil
 }
 
 // VerifyFileSHA1 computes the SHA-1 hex digest of filePath and compares it against expectedHex (case-insensitive).
@@ -355,18 +462,23 @@ func VerifyFileSHA1(filePath, expectedHex string) (bool, string) {
 // ExtractZipAtomically extracts zipPath into destDir via a sibling temporary folder,
 // stripping a single common top-level directory if present and guarding against Zip Slip path traversal.
 func ExtractZipAtomically(ctx context.Context, zipPath, destDir string, onProgress ProgressFunc, targetID, name string) error {
+	destDir = filepath.Clean(destDir)
 	r, err := zip.OpenReader(zipPath)
 	if err != nil {
 		return fmt.Errorf("打开压缩包 %s 失败: %w", filepath.Base(zipPath), err)
 	}
 	defer r.Close()
 
-	if err := os.MkdirAll(filepath.Dir(destDir), 0o755); err != nil {
+	if len(r.File) > maxArchiveEntries {
+		return fmt.Errorf("压缩包包含过多条目（超过 %d 个）", maxArchiveEntries)
+	}
+
+	parentDir := filepath.Dir(destDir)
+	if err := os.MkdirAll(parentDir, 0o755); err != nil {
 		return err
 	}
-	tmpDir := destDir + ".extract_tmp"
-	_ = os.RemoveAll(tmpDir)
-	if err := os.MkdirAll(tmpDir, 0o755); err != nil {
+	tmpDir, err := os.MkdirTemp(parentDir, ".virdeck-extract-*")
+	if err != nil {
 		return fmt.Errorf("创建临时解压目录失败: %w", err)
 	}
 	defer func() {
@@ -374,12 +486,13 @@ func ExtractZipAtomically(ctx context.Context, zipPath, destDir string, onProgre
 	}()
 
 	stripPrefix := detectSingleRootPrefix(r.File)
-	entries, err := validateZipEntries(r.File, stripPrefix)
+	entries, linkTargets, err := validateZipEntriesWithLinks(r.File, stripPrefix)
 	if err != nil {
 		return err
 	}
 	cleanTmpRoot := filepath.Clean(tmpDir) + string(os.PathSeparator)
 
+	remaining := maxArchiveExtractBytes
 	totalFiles := len(r.File)
 	for i, f := range r.File {
 		select {
@@ -409,7 +522,7 @@ func ExtractZipAtomically(ctx context.Context, zipPath, destDir string, onProgre
 		if err := os.MkdirAll(filepath.Dir(cleanTarget), 0o755); err != nil {
 			return err
 		}
-		if err := extractSingleZipEntry(f, cleanTarget); err != nil {
+		if err := extractSingleZipEntry(f, cleanTarget, linkTargets[f], &remaining); err != nil {
 			return err
 		}
 
@@ -423,7 +536,7 @@ func ExtractZipAtomically(ctx context.Context, zipPath, destDir string, onProgre
 		}
 	}
 
-	backupDir := destDir + ".old_tmp"
+	backupDir := filepath.Join(parentDir, ".virdeck-old-"+filepath.Base(tmpDir))
 	_ = os.RemoveAll(backupDir)
 	if _, err := os.Stat(destDir); err == nil {
 		if err := os.Rename(destDir, backupDir); err != nil {
@@ -471,6 +584,8 @@ func ExtractArchiveAtomically(ctx context.Context, archivePath, destDir string, 
 	defer tmp.Close()
 	zw := zip.NewWriter(tmp)
 	tr := tar.NewReader(gz)
+	entryCount := 0
+	remaining := maxArchiveExtractBytes
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -482,25 +597,46 @@ func ExtractArchiveAtomically(ctx context.Context, archivePath, destDir string, 
 		if err != nil {
 			return err
 		}
-		zh := &zip.FileHeader{Name: h.Name, Method: zip.Deflate}
+		entryCount++
+		if entryCount > maxArchiveEntries {
+			return fmt.Errorf("压缩包包含过多条目（超过 %d 个）", maxArchiveEntries)
+		}
+		normName := strings.ReplaceAll(h.Name, "\\", "/")
+		if !safeArchivePath(normName) {
+			return fmt.Errorf("压缩包包含非法路径: %s", h.Name)
+		}
+		zh := &zip.FileHeader{Name: normName, Method: zip.Deflate}
 		zh.SetMode(h.FileInfo().Mode())
 		switch h.Typeflag {
 		case tar.TypeReg, tar.TypeRegA, tar.TypeDir, tar.TypeSymlink:
 		default:
 			return fmt.Errorf("不支持的 tar 条目: %s", h.Name)
 		}
+		if h.Typeflag == tar.TypeSymlink {
+			if len(h.Linkname) > maxSymlinkTargetBytes {
+				return fmt.Errorf("非法符号链接: %s", h.Name)
+			}
+			out, err := zw.CreateHeader(zh)
+			if err != nil {
+				return err
+			}
+			if _, err = io.WriteString(out, h.Linkname); err != nil {
+				return err
+			}
+			continue
+		}
 		out, err := zw.CreateHeader(zh)
 		if err != nil {
 			return err
 		}
-		if h.Typeflag == tar.TypeSymlink {
-			_, err = io.WriteString(out, h.Linkname)
-		} else {
-			_, err = io.Copy(out, tr)
-		}
+		n, err := io.Copy(out, io.LimitReader(tr, remaining+1))
 		if err != nil {
 			return err
 		}
+		if n > remaining {
+			return fmt.Errorf("压缩包解压体积超过安全上限 (%d GiB)", maxArchiveExtractBytes>>30)
+		}
+		remaining -= n
 	}
 	if err = zw.Close(); err != nil {
 		return err
@@ -511,22 +647,19 @@ func ExtractArchiveAtomically(ctx context.Context, archivePath, destDir string, 
 	return ExtractZipAtomically(ctx, tmp.Name(), destDir, onProgress, targetID, name)
 }
 
-func extractSingleZipEntry(f *zip.File, dstPath string) error {
+func extractSingleZipEntry(f *zip.File, dstPath, linkTarget string, remaining *int64) error {
+	mode := f.Mode()
+	if mode&os.ModeSymlink != 0 {
+		return os.Symlink(linkTarget, dstPath)
+	}
 	rc, err := f.Open()
 	if err != nil {
 		return err
 	}
 	defer rc.Close()
 
-	mode := f.Mode()
-	if mode&os.ModeSymlink != 0 {
-		target, err := io.ReadAll(io.LimitReader(rc, 64*1024+1))
-		if err != nil {
-			return err
-		}
-		return os.Symlink(string(target), dstPath)
-	}
-	mode = mode.Perm()
+	// Strip group/other write bits so archive headers cannot bypass process umask to create world-writable binaries.
+	mode = mode.Perm() & 0o755
 	if mode == 0 {
 		mode = 0o644
 	}
@@ -536,9 +669,14 @@ func extractSingleZipEntry(f *zip.File, dstPath string) error {
 	}
 	defer out.Close()
 
-	if _, err = io.Copy(out, rc); err != nil {
+	n, err := io.Copy(out, io.LimitReader(rc, *remaining+1))
+	if err != nil {
 		return err
 	}
+	if n > *remaining {
+		return fmt.Errorf("压缩包解压体积超过安全上限 (%d GiB)", maxArchiveExtractBytes>>30)
+	}
+	*remaining -= n
 	// Explicit chmod preserves executable bits even with a restrictive umask.
 	return out.Chmod(mode)
 }
@@ -547,13 +685,19 @@ func extractSingleZipEntry(f *zip.File, dstPath string) error {
 // never allow a file to be written through a link, or a later link to replace a
 // previously populated directory. Framework links may point through other links.
 func validateZipEntries(files []*zip.File, prefix string) (map[*zip.File]string, error) {
+	entries, _, err := validateZipEntriesWithLinks(files, prefix)
+	return entries, err
+}
+
+func validateZipEntriesWithLinks(files []*zip.File, prefix string) (map[*zip.File]string, map[*zip.File]string, error) {
 	entries := make(map[*zip.File]string, len(files))
+	linkTargets := make(map[*zip.File]string)
 	links := make(map[string]string)
 	seen := make(map[string]bool)
 	for _, f := range files {
 		name := strings.ReplaceAll(f.Name, "\\", "/")
 		if !safeArchivePath(name) {
-			return nil, fmt.Errorf("压缩包包含非法路径: %s", f.Name)
+			return nil, nil, fmt.Errorf("压缩包包含非法路径: %s", f.Name)
 		}
 		rel := strings.TrimSuffix(strings.TrimPrefix(name, prefix), "/")
 		if rel == "" {
@@ -561,42 +705,43 @@ func validateZipEntries(files []*zip.File, prefix string) (map[*zip.File]string,
 		}
 		key := archivePathKey(rel)
 		if seen[key] {
-			return nil, fmt.Errorf("压缩包包含重复路径: %s", rel)
+			return nil, nil, fmt.Errorf("压缩包包含重复路径: %s", rel)
 		}
 		seen[key] = true
 		entries[f] = rel
 		if f.Mode()&os.ModeSymlink != 0 {
 			r, err := f.Open()
 			if err != nil {
-				return nil, err
+				return nil, nil, err
 			}
-			data, err := io.ReadAll(io.LimitReader(r, 64*1024+1))
+			data, err := io.ReadAll(io.LimitReader(r, maxSymlinkTargetBytes+1))
 			r.Close()
 			if err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 			target := string(data)
-			if len(data) > 64*1024 || target == "" || strings.ContainsAny(target, "\\\x00:") || path.IsAbs(target) {
-				return nil, fmt.Errorf("非法符号链接: %s", rel)
+			if len(data) > maxSymlinkTargetBytes || target == "" || strings.ContainsAny(target, "\\\x00:") || path.IsAbs(target) {
+				return nil, nil, fmt.Errorf("非法符号链接: %s", rel)
 			}
 			links[key] = target
+			linkTargets[f] = target
 		} else if !f.Mode().IsRegular() && !f.FileInfo().IsDir() {
-			return nil, fmt.Errorf("不支持的压缩包条目: %s", rel)
+			return nil, nil, fmt.Errorf("不支持的压缩包条目: %s", rel)
 		}
 	}
 	for _, rel := range entries {
 		for parent := path.Dir(rel); parent != "."; parent = path.Dir(parent) {
 			if _, ok := links[archivePathKey(parent)]; ok {
-				return nil, fmt.Errorf("压缩包路径穿过符号链接: %s", rel)
+				return nil, nil, fmt.Errorf("压缩包路径穿过符号链接: %s", rel)
 			}
 		}
 	}
 	for rel, target := range links {
 		if err := validateLinkTarget(path.Dir(rel)+"/"+target, links, map[string]bool{rel: true}); err != nil {
-			return nil, fmt.Errorf("非法符号链接 %s: %w", rel, err)
+			return nil, nil, fmt.Errorf("非法符号链接 %s: %w", rel, err)
 		}
 	}
-	return entries, nil
+	return entries, linkTargets, nil
 }
 
 func safeArchivePath(name string) bool {
@@ -681,31 +826,43 @@ func (c *Client) FetchRepositoryPackages(ctx context.Context, xmlURL string) ([]
 
 // FetchRepositoryPackagesForHost resolves packages for an explicitly selected host.
 func (c *Client) FetchRepositoryPackagesForHost(ctx context.Context, xmlURL, goos, goarch string) ([]RemoteArchive, error) {
+	parsedXML, err := url.Parse(strings.TrimSpace(xmlURL))
+	if err != nil || parsedXML.Host == "" || (!strings.EqualFold(parsedXML.Scheme, "http") && !strings.EqualFold(parsedXML.Scheme, "https")) {
+		return nil, errors.New("仓库索引 URL 仅支持合法的 http:// 或 https:// 地址")
+	}
 	hc, err := c.httpClient(25 * time.Second)
 	if err != nil {
 		return nil, err
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, xmlURL, nil)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("创建仓库索引请求失败: %s", config.RedactError(err))
 	}
 	resp, err := hc.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("请求仓库索引失败: %s", config.RedactError(err))
 	}
 	defer resp.Body.Close()
+	redactedXML := config.RedactProxyURL(xmlURL)
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("获取仓库索引 %s 失败: HTTP %d", xmlURL, resp.StatusCode)
+		return nil, fmt.Errorf("获取仓库索引 %s 失败: HTTP %d", redactedXML, resp.StatusCode)
 	}
 	const maxManifestBytes = 64 << 20 // 64 MiB
 	data, err := io.ReadAll(io.LimitReader(resp.Body, maxManifestBytes+1))
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("读取仓库索引失败: %s", config.RedactError(err))
 	}
 	if len(data) > maxManifestBytes {
-		return nil, fmt.Errorf("仓库索引 %s 超过大小上限 (%d MiB)", xmlURL, maxManifestBytes>>20)
+		return nil, fmt.Errorf("仓库索引 %s 超过大小上限 (%d MiB)", redactedXML, maxManifestBytes>>20)
 	}
-	baseURL := xmlURL[:strings.LastIndex(xmlURL, "/")+1]
+	baseURL := parsedXML.ResolveReference(&url.URL{Path: "."}).String()
+	if idx := strings.LastIndex(parsedXML.Path, "/"); idx >= 0 {
+		uCopy := *parsedXML
+		uCopy.RawQuery = ""
+		uCopy.Fragment = ""
+		uCopy.Path = parsedXML.Path[:idx+1]
+		baseURL = uCopy.String()
+	}
 	return ParseRepositoryXMLForHost(data, baseURL, goos, goarch)
 }
 
@@ -773,6 +930,7 @@ func ParseRepositoryXMLForHost(data []byte, baseURL, goos, goarch string) ([]Rem
 	if !strings.HasSuffix(baseURL, "/") {
 		baseURL += "/"
 	}
+	baseParsed, baseErr := url.Parse(baseURL)
 
 	var results []RemoteArchive
 	for _, pkg := range repo.Packages {
@@ -790,9 +948,29 @@ func ParseRepositoryXMLForHost(data []byte, baseURL, goos, goarch string) ([]Rem
 		if chosen == nil || strings.TrimSpace(chosen.Complete.URL) == "" {
 			continue
 		}
-		u := strings.TrimSpace(chosen.Complete.URL)
-		if !strings.HasPrefix(u, "http://") && !strings.HasPrefix(u, "https://") {
-			u = baseURL + strings.TrimPrefix(u, "/")
+		rawU := strings.TrimSpace(chosen.Complete.URL)
+		var u string
+		if baseErr == nil && baseParsed != nil && baseParsed.Scheme != "" {
+			ref, rerr := url.Parse(rawU)
+			if rerr != nil {
+				continue
+			}
+			resolved := baseParsed.ResolveReference(ref)
+			rScheme := strings.ToLower(resolved.Scheme)
+			if (rScheme != "http" && rScheme != "https") || resolved.Host == "" {
+				continue
+			}
+			if strings.EqualFold(baseParsed.Scheme, "https") && rScheme != "https" {
+				continue
+			}
+			u = resolved.String()
+		} else {
+			lowerU := strings.ToLower(rawU)
+			if !strings.HasPrefix(lowerU, "http://") && !strings.HasPrefix(lowerU, "https://") {
+				u = baseURL + strings.TrimPrefix(rawU, "/")
+			} else {
+				u = rawU
+			}
 		}
 		rev := strconv.Itoa(pkg.Revision.Major)
 		if pkg.Revision.Minor > 0 || pkg.Revision.Micro > 0 {
@@ -872,7 +1050,7 @@ func savePartMeta(path string, m partMeta) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, data, 0o644)
+	return os.WriteFile(path, data, 0o600)
 }
 
 func sanitizeFileName(s string) string {

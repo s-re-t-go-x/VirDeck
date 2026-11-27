@@ -28,8 +28,13 @@ func TestArmCatalogHidesIncompatibleOfficialImages(t *testing.T) {
 	if !found {
 		t.Fatal("official ARM image hidden")
 	}
-	if got, ok := s.Get("system-images;android-30;google_apis_playstore;arm64-v8a", nil); !ok || !got.Favorite {
-		t.Fatalf("ARM default favorite missing: %+v", got)
+	for _, id := range []string{
+		"system-images;android-30;google_apis_playstore;arm64-v8a",
+		"system-images;android-34;google_apis_playstore;arm64-v8a",
+	} {
+		if got, ok := s.Get(id, nil); !ok || !got.Favorite || got.Note == "" {
+			t.Fatalf("ARM default favorite missing %s: %+v", id, got)
+		}
 	}
 }
 

@@ -1,187 +1,158 @@
 # VirDeck 应用安全审核与加固报告
 
-**报告生成日期**：2026-11-10  
-**审核人员**：应用安全工程团队  
-**当前状态**：完成审核，可修复漏洞已在当前工作副本中全部加固并验证通过
+**更新日期**：2026-11-27（对应版本 `v0.10.0`）  
+**审核范围**：全部非测试 Go 源码（`cmd/`、`core/`、`adapters/`、`config/`、`assets/`、`scripts/`）、预设与产品清单（[`config/defaults.json`](../config/defaults.json)、[`assets/product.json`](../assets/product.json)）及 CI/CD 工作流（[`.github/workflows/cross-platform.yml`](../.github/workflows/cross-platform.yml)）  
+**当前状态**：两阶段安全审核与第一档迁移修复均已落地并通过构建与测试验证；`go1.27.4` 临时编译产物的 `govulncheck` 二进制扫描未发现已知漏洞（`No vulnerabilities found.`）。
 
 ---
 
-## 一、项目概况
+## 一、安全基线与依赖概况
 
-- **项目名称**：VirDeck（轻量高效 Android 虚拟机/多开管理器）
-- **核心语言与工具链**：Go `1.27.3` (`windows/amd64` / `darwin/arm64` / `linux/amd64`)，纯 Go 无 CGO 依赖架构（`CGO_ENABLED=0`）
-- **UI 框架**：[`github.com/egoist/mygo v0.8.3`](../go.mod) 原生轻量跨平台桌面框架
-- **依赖清单与数量**：
-  - 直接依赖（3 个）：[`github.com/egoist/mygo v0.8.3`](../go.mod)、[`github.com/ebitengine/purego v0.11.1`](../go.mod)（macOS 原生窗口交互）、[`golang.org/x/text v0.43.0`](../go.mod)（Unicode 标准化与大小写转换）
-  - 间接依赖（3 个）：[`github.com/go-text/typesetting v0.3.5`](../go.mod)、[`golang.org/x/image v0.46.0`](../go.mod)、[`golang.org/x/net v0.59.0`](../go.mod)
-- **审核范围**：
-  - 全部 Go 源码（`cmd/`、`core/`、`adapters/`、`config/`、`scripts/` 共 40+ 源码文件）
-  - CI/CD 工作流（[`.github/workflows/cross-platform.yml`](../.github/workflows/cross-platform.yml)）
-  - 预设配置与资源（[`config/defaults.json`](../config/defaults.json)、[`assets/product.json`](../assets/product.json)）
-  - Git 提交历史与本地运行环境配置凭据（`dist/VirDeckData/`）
+### 1. 语言、架构与凭据基线
 
----
+- **开发语言与构建方式**：Go `1.27.4`（`CGO_ENABLED=0` 纯 Go 静态编译），通过 [`go.mod`](../go.mod) 与 [`go.sum`](../go.sum) 管理依赖。
+- **UI 与平台架构**：桌面 GUI 基于 `github.com/egoist/mygo v0.10.0`。[`adapters/mygonative/app.go`](../adapters/mygonative/app.go) 通过 `WindowOptions{Content: ui.View(vm.view)}` 使用纯原生 Canvas 渲染（显式禁用调试检查器与开发者工具：`DevToolsDisabled`，发布构建 [`scripts/package/main.go`](../scripts/package/main.go) 默认注入 `-tags mygo_noinspector` 与 `-X github.com/egoist/mygo.production=1`），未使用 WebView、HTML/JS 注入或 JS-Go 桥接，因此不存在 WebView XSS 或远程页面 IPC 暴露面。
+- **密钥与凭据扫描**：对全仓库源码、配置、测试、脚本及 Git 历史执行模式检索与敏感文件排查，未发现硬编码 API Key、Token、私钥或被追踪的 `.env` / `adbkey` 文件；[`.gitignore`](../.gitignore) 已正确忽略 `.env`、`.env.*`（保留 `!.env.example`）、`adbkey` 与 `adbkey.pub`。运行期凭据管理风险主要集中在代理密码的脱敏、GUI/CLI 输入回显、备份包导出以及 Windows 多用户目录权限边界。
 
-## 二、问题汇总表
+### 2. 依赖清单与漏洞核查
 
-| 编号 | 类别 | 严重级别 | 位置 | 状态 | 简述 |
-| :--- | :--- | :---: | :--- | :---: | :--- |
-| **SEC-01** | CI/CD | **High** | [`.github/workflows/cross-platform.yml:80-94`](../.github/workflows/cross-platform.yml) | **已修复** | `workflow_dispatch` 动态输入直接拼接至 bash 脚本导致脚本执行注入与 `$GITHUB_OUTPUT` 污染 |
-| **SEC-02** | 代码漏洞 | **High** | [`core/catalog/catalog.go:463`](../core/catalog/catalog.go)、[`core/emu/avd_native.go:39`](../core/emu/avd_native.go)、[`core/emu/emu.go:706`](../core/emu/emu.go) | **已修复** | 镜像包 ID 与 AVD 实例名未过滤 `..` / 路径分隔符，导致任意目录穿越写入与删除 |
-| **SEC-03** | 代码漏洞 | **Medium** | [`core/emu/avd_native.go:227-277`](../core/emu/avd_native.go) | **已修复** | `package.xml` 生成时未对 `source.properties` 元数据转义，存在 XML 注入与 INI 属性篡改风险 |
-| **SEC-04** | 代码漏洞 | **Medium** | [`core/downloader/downloader.go:700`](../core/downloader/downloader.go) | **已修复** | 下载 SDK 仓库索引 XML 时使用无上限 `io.ReadAll(resp.Body)`，存在超大响应内存耗尽（DoS）风险 |
-| **SEC-05** | 代码漏洞 | **Medium** | [`core/adb/adb.go:196`](../core/adb/adb.go) | **已修复** | `InstallAPK` 对外部传入路径未防范 `-` 开头字符串，存在 ADB 命令行参数注入风险 |
-| **SEC-06** | 凭据安全 | **Low** | [`core/emu/emu.go:187`](../core/emu/emu.go)、[`core/service/bootstrap.go:74`](../core/service/bootstrap.go)、[`core/instance/registry.go:122`](../core/instance/registry.go) | **已修复** | `.android` 密钥目录及含代理认证信息的配置文件使用了过宽的文件权限（`0o755`/`0o644`） |
-| **SEC-07** | CI/CD | **Medium** | [`.github/workflows/cross-platform.yml:22`](../.github/workflows/cross-platform.yml) | **已修复** | 工作流全局声明 `permissions: contents: write`，使得三端构建与测试 Job 携带过高写权限 |
-| **SEC-08** | 凭据安全 | **Low** | [`.gitignore:14-22`](../.gitignore) | **已修复** | `.gitignore` 未排除本地环境凭据 `.env` 及 ADB 私钥 `adbkey`，存在误提交风险 |
-| **SEC-09** | 架构设计 | **Medium** | [`core/downloader/downloader.go:155`](../core/downloader/downloader.go)、[`config/defaults.json:30,147`](../config/defaults.json) | **已采纳建议，待下版本落地** | 组件下载支持 SHA-256 自适应校验；为内置预设补齐哈希；无哈希项增加安全提示 |
-| **SEC-10** | 依赖安全 | **Low** | [`go.mod:5-13`](../go.mod) | **已采纳建议，待下版本落地** | 间接依赖 `golang.org/x/net v0.59.0` 待下次联网发布时升级至 `v0.62.0`；直接依赖已纠正分类 |
-| **SEC-11** | 供应链 | **Low** | [`.github/workflows/cross-platform.yml:95`](../.github/workflows/cross-platform.yml) | **建议关注** | 第三方 Action（如 `softprops/action-gh-release@v2`）使用可变 Release Tag 未绑定完整 Commit SHA |
+| 类别 | 模块路径 | 当前版本 | 安全状态 |
+| :--- | :--- | :--- | :--- |
+| 工具链 | Go 标准库 | `1.27.4` | **无已知漏洞**（已从 `1.27.3` 升级，消除 `GO-2026-6859` / `CVE-2026-97054` 及 11 项构建链 cgo 修复） |
+| 直接依赖 | `github.com/ebitengine/purego` | `v0.11.3` | 无已知漏洞（已从 `v0.11.1` 升级） |
+| 直接依赖 | `github.com/egoist/mygo` | `v0.10.0` | 无已知漏洞，活跃维护 |
+| 直接依赖 | `golang.org/x/text` | `v0.44.0` | 无已知漏洞（已从 `v0.43.0` 升级） |
+| 间接依赖 | `github.com/go-text/typesetting` | `v0.3.5` | 无已知漏洞（锁文件含传递版本 `typesetting-utils v0.0.0-20260419141703-4ffe8874dabc`） |
+| 间接依赖 | `golang.org/x/image` | `v0.48.0` | 无已知漏洞（已从 `v0.46.0` 升级） |
+| 间接依赖 | `golang.org/x/net` | `v0.63.0` | 无已知漏洞（已从 `v0.62.0` 升级） |
+
+### 3. `v0.10.0` 既承安全基线（SEC-01 ～ SEC-11）
+
+历史安全报告中的基础防护经本次代码逐项核验后已确认持续生效，并纳入新基线持续维护：
+
+- **CI/CD 供应链与权限收敛（原 SEC-01 / SEC-07 / SEC-11）**：[`cross-platform.yml`](../.github/workflows/cross-platform.yml) 中 `actions/checkout`、`actions/setup-go`、`actions/upload-artifact`、`actions/download-artifact` 均已锁定完整 40 位 Git Commit SHA；顶层权限收窄至 `contents: read`，仅 `release` Job 声明 `contents: write` 且使用 `gh release create --verify-tag`（禁止覆盖已有 Release）；`workflow_dispatch` 输入通过环境变量与标签正则校验传递，杜绝命令注入。
+- **既有路径/输入/文件权限基线（原 SEC-02 ～ SEC-06 / SEC-08 / SEC-09 / SEC-10）**：镜像包 ID 与 AVD 名称路径段安全校验、XML/INI 转义与换行清洗、`io.LimitReader(..., 64<<20)` 索引大小限制、`.android`（`0o700`）与配置 JSON（`0o600`）私有权限落盘、`.gitignore` 屏蔽敏感私钥文件、内嵌跨平台 `scrcpy` SHA-256 校验以及对无校验和镜像展示「⚠ 未提供安全校验和」预警。
 
 ---
 
-## 三、已修复的问题及具体改动
+## 二、审核问题汇总表
 
-### 1. 修复 GitHub Actions 脚本注入与权限越权（SEC-01、SEC-07）
-- **涉及文件**：[`.github/workflows/cross-platform.yml`](../.github/workflows/cross-platform.yml)
-- **原因与风险**：
-  1. 此前工作流顶层直接赋予 `permissions: contents: write`，导致 Windows / macOS / Linux 矩阵测试作业均具备向主仓库推送代码或篡改 Release 的写权限。
-  2. 在 `Prepare release assets and metadata` 步骤中，脚本直接将 `${{ inputs.tag_name }}`、`${{ inputs.release_title }}` 字符串拼接到 bash 代码体中。若输入的标签名或标题包含单双引号、换行或命令替换语法（如 `$(...)`），攻击者可在具备 `contents: write` 凭据的 runner 上执行任意命令或覆盖 GitHub Output。
-- **具体修改**：
-  - 将全局工作流权限严格收窄至 `permissions: contents: read`，仅为最终的 `release` 作业独立声明 `contents: write` 权限。
-  - 将输入参数改为通过安全的环境变量映射（`INPUT_TAG_NAME: ${{ inputs.tag_name }}` 等），并对 `TAG` 进行严格正则校验（`^[A-Za-z0-9._-]+$`），剥除标题中的非法回车换行符。
-
-### 2. 修复包 ID 与 AVD 实例名路径穿越漏洞（SEC-02）
-- **涉及文件**：
-  - [`core/catalog/catalog.go`](../core/catalog/catalog.go)
-  - [`core/emu/avd_native.go`](../core/emu/avd_native.go)
-  - [`core/emu/emu.go`](../core/emu/emu.go)
-- **原因与风险**：
-  - 原代码中的 `SplitPackageID` 仅按分号分割，未检查分段内容。若恶意系统镜像包 ID 包含 `system-images;..;..;arbitrary`，程序将在调用 `filepath.Join(c.sdkRoot, "system-images", apiFolder, tagDir, abi)` 时穿越出 SDK 目录创建并写入文件。
-  - 在 `CreateAVDNative`、`CloneAVD`、`DeleteAVD` 中，若实例名称 `name` 传入包含 `..` 或斜杠字符，将导致删除或覆盖宿主机任意目录。
-- **具体修改**：
-  - 增加 `isSafePathSegment` 与 `isSafePackageSegment` 严格防穿越检查，拦截空值、`.`、`..` 以及含 `/\:*?"<>|`、空字节和换行符的非法命名。
-  - 在 `CreateAVDNative`、`CloneAVD`、`DeleteAVD` 及元数据生成函数入口增加前置阻断。
-
-### 3. 修复动态元数据 XML / INI 注入漏洞（SEC-03）
-- **涉及文件**：[`core/emu/avd_native.go`](../core/emu/avd_native.go)
-- **原因与风险**：
-  - `EnsureSystemImageMetadata` 从本地解压目录读取 `source.properties` 的描述、版本、厂商信息等键值后，通过 `fmt.Sprintf` 直接拼装进 `package.xml`。第三方非官方解包镜像可借此注入任意恶意 XML 节点破坏 SDK 结构。
-  - 生成 `config.ini` 与 `.ini` 描述文件时未清洗换行符，可能产生配置键值劫持。
-- **具体修改**：
-  - 引入标准库 `xml.EscapeText` 对所有插入 XML 的变量（`apiLevel`、`vendorID`、`vendorDisplay`、`abi`、`revMajor`、`desc`）进行统一转义。
-  - 对写回 INI 文件的行增加 `cleanIniLine`，统一剔除 `\r` 并将多行文本安全平铺，防止注入额外配置项。
-
-### 4. 修复远程 XML 仓库解析内存耗尽（DoS）风险（SEC-04）
-- **涉及文件**：[`core/downloader/downloader.go`](../core/downloader/downloader.go)
-- **原因与风险**：
-  - `FetchRepositoryPackagesForHost` 使用无限制的 `io.ReadAll(resp.Body)` 读取远程 XML 仓库。若用户配置了恶意镜像源代理或目标响应异常，可能下载无限流导致 OOM 崩溃。
-  - `Download` 解析 URL 生成本地保存文件名时，未对文件名做非法字符剔除。
-- **具体修改**：
-  - 使用 `io.LimitReader(resp.Body, 64<<20)` 施加 64 MiB 保护上限（正常 Android 官方索引约为 1~5 MiB），超出即返回明确错误，杜绝内存耗尽。
-  - 完善 `sanitizeFileName` 清洗规则，拦截保留名称与路径穿越字符。
-
-### 5. 修复 `adb install` 参数注入风险（SEC-05）
-- **涉及文件**：[`core/adb/adb.go`](../core/adb/adb.go)
-- **原因与风险**：
-  - `InstallAPK(ctx, port, apkPath)` 直接将 `apkPath` 传入底层 `adb -s <serial> install -r <apkPath>`。若外部或 CLI 误传以 `-` 开头的字符串（例如用户输入错误标志位 `-l`），ADB 会将其识别为内部选项从而发生行为偏离。
-- **具体修改**：
-  - 增加对 `apkPath` 的合法性校验，拒绝空路径及以 `-` 开头的非法路径参数。
-
-### 6. 收敛敏感文件与目录访问权限（SEC-06、SEC-08）
-- **涉及文件**：
-  - [`core/emu/emu.go`](../core/emu/emu.go)
-  - [`core/service/bootstrap.go`](../core/service/bootstrap.go)
-  - [`core/instance/registry.go`](../core/instance/registry.go)
-  - [`.gitignore`](../.gitignore)
-- **原因与风险**：
-  - `settings.json` 与 `instances.json` 中允许配置 HTTP/SOCKS 代理地址（可能携带 `http://user:pass@host:port` 明文凭据）。
-  - `<DataDir>/.android` 目录包含 ADB 守护进程的 `adbkey` 认证私钥，原权限 `0o755` / `0o644` 在多用户系统（macOS / Linux）下允许同机其他用户读取私钥与代理密码。
-- **具体修改**：
-  - 创建 `.android` 密钥目录权限由 `0o755` 调整为严格属主独占的 `0o700`。
-  - `saveSettings` 与 `saveLocked` 临时写入权限调整为属主只读写 `0o600`。
-  - 在 `.gitignore` 中补充忽略规则：`.env`、`.env.*`（保留 `!.env.example`）及 `adbkey`、`adbkey.pub`。
-
-### 7. 规范 Go 模块直接依赖关系（SEC-10）
-- **涉及文件**：[`go.mod`](../go.mod)
-- **原因与风险**：
-  - [`core/screenlayout/native_darwin.go`](../core/screenlayout/native_darwin.go) 直接 import 了 `purego`，[`core/downloader/downloader.go`](../core/downloader/downloader.go) 直接 import 了 `golang.org/x/text`，但此前在 `go.mod` 中均标记为 `// indirect`。
-- **具体修改**：
-  - 将 `purego` 与 `golang.org/x/text` 正式声明为项目直接依赖，使依赖审计与供应链溯源更加清晰准确。
+| 编号 | 类别 | 严重级别 | 涉及位置 | 当前状态 |
+| :--- | :---: | :---: | :--- | :---: |
+| **F-01** | 代码 | **High** | [`core/downloader/downloader.go`](../core/downloader/downloader.go) | **已修复** |
+| **F-02** | 代码 | **High** | [`core/downloader/downloader.go`](../core/downloader/downloader.go), [`core/catalog/catalog.go`](../core/catalog/catalog.go) | **已修复** |
+| **F-03** | 代码 | **High** | [`core/emu/disk.go`](../core/emu/disk.go), [`core/emu/emu.go`](../core/emu/emu.go) | **已修复** |
+| **F-04** | 代码 | **High** | [`core/adb/adb.go`](../core/adb/adb.go), [`core/apk/apk.go`](../core/apk/apk.go) | **已修复** |
+| **F-05** | 代码 | **Medium** | [`core/apk/apk.go`](../core/apk/apk.go) | **已修复** |
+| **F-06** | 密钥 | **Medium** | [`config/redact.go`](../config/redact.go), [`core/downloader/downloader.go`](../core/downloader/downloader.go), [`core/service/bootstrap.go`](../core/service/bootstrap.go), [`core/service/manager.go`](../core/service/manager.go), `adapters/` | **已修复** |
+| **F-07** | 代码 | **Medium** | [`core/downloader/downloader.go`](../core/downloader/downloader.go) | **已修复** |
+| **F-08** | 代码 | **Medium** | [`core/downloader/downloader.go`](../core/downloader/downloader.go), [`core/catalog/catalog.go`](../core/catalog/catalog.go), [`core/instance/registry.go`](../core/instance/registry.go), [`core/service/bootstrap.go`](../core/service/bootstrap.go) | **已修复** |
+| **F-09** | 代码 | **Medium** | [`core/service/backup_disk.go`](../core/service/backup_disk.go), [`core/emu/disk.go`](../core/emu/disk.go) | **已修复** |
+| **F-10** | 代码 | **Medium** | [`core/service/manager.go`](../core/service/manager.go) | **已修复** |
+| **F-11** | 代码 | **Medium** | [`core/syncinput/scrcpy_channel.go`](../core/syncinput/scrcpy_channel.go) | **已修复** |
+| **F-12** | 代码 | **Medium** | [`core/emu/socks_bridge.go`](../core/emu/socks_bridge.go) | **已修复** |
+| **F-13** | 代码 | **Medium** | [`core/screenlayout/native_darwin.go`](../core/screenlayout/native_darwin.go), [`core/screenlayout/close_darwin.go`](../core/screenlayout/close_darwin.go) | **已修复** |
+| **F-14** | 代码 | **Medium** | [`core/syncinput/capture_windows.go`](../core/syncinput/capture_windows.go), [`core/syncinput/broadcaster.go`](../core/syncinput/broadcaster.go), [`core/service/syncinput.go`](../core/service/syncinput.go) | **已修复** |
+| **F-15** | 代码 | **Medium** | [`adapters/mygonative/tools_modals.go`](../adapters/mygonative/tools_modals.go) | **已修复** |
+| **F-16** | 代码 | **Low** | [`core/service/`](../core/service/manager.go), [`core/emu/`](../core/emu/emu.go), [`core/adb/`](../core/adb/adb.go) | **已修复** |
+| **F-17** | 代码 | **Low** | [`adapters/mygonative/`](../adapters/mygonative/app.go), [`scripts/package/main.go`](../scripts/package/main.go), [`cross-platform.yml`](../.github/workflows/cross-platform.yml) | **已修复** |
+| **D-01** | 依赖 | **Medium** | [`go.mod`](../go.mod), [`go.sum`](../go.sum) | **已修复**（升至 Go `1.27.4` 及小版本依赖） |
+| **D-02** | 代码/密钥 | **High** | [`core/emu/winpath_windows.go`](../core/emu/winpath_windows.go), [`core/emu/winpath_common.go`](../core/emu/winpath_common.go) | **暂缓 / 已知限制**（面向个人 PC 场景暂不迁移） |
+| **D-03** | 密钥 | **Medium** | [`core/service/backup_disk.go`](../core/service/backup_disk.go), [`core/service/types.go`](../core/service/types.go), [`adapters/cli/cli.go`](../adapters/cli/cli.go), [`adapters/mygonative/tools_modals.go`](../adapters/mygonative/tools_modals.go) | **已修复**（默认脱敏 + GUI/CLI 显式开关） |
+| **D-04** | 密钥 | **Medium** | [`adapters/mygonative/edit.go`](../adapters/mygonative/edit.go), [`adapters/cli/cli.go`](../adapters/cli/cli.go), [`core/emu/emu.go`](../core/emu/emu.go) | **部分修复**（UI 掩码与 CLI `VIRDECK_PROXY`/`-proxy-stdin` 已落地；非 SOCKS5 HTTP 代理进程参数保持现状） |
+| **D-05** | 代码 | **Medium** | [`core/downloader/downloader.go`](../core/downloader/downloader.go), [`config/defaults.json`](../config/defaults.json) | **已修复（务实版）**（URL 隔离缓存与防未校验复用已落地；非收藏镜像直链已清空为动态官方同步） |
+| **D-06** | 代码 | **Medium** | [`core/adb/transfer.go`](../core/adb/transfer.go) | **维持现状**（不采用 `exec-out tar`，依赖隔离导出目录与前置 `find` 校验） |
+| **D-07** | 代码 | **Low** | [`scripts/icongen/main.go`](../scripts/icongen/main.go) | **已修复（极简版）**（移除仓库内 `.exe` 自动执行） |
+| **S-01** | 代码 | **Info** | [`core/adb/transfer.go`](../core/adb/transfer.go), [`core/emu/screens.go`](../core/emu/screens.go) | **已修复** |
 
 ---
 
-## 四、验证结果
+## 三、已修复问题及具体改动
 
-代码修改完成后，在本地执行了完整的静态分析与构建测试：
-1. **静态分析**：
-   ```bash
-   go vet ./...
-   ```
-   **结果**：0 警告，0 错误，静态检查全部通过。
-2. **完整二进制构建**：
-   ```powershell
-   go build ./cmd/app
-   go build ./cmd/cli
-   ```
-   **结果**：桌面 GUI 主程序与 CLI 控制台工具均顺利编译成功。
-3. **单元测试与回归验证**：
-   - `virdeck/adapters/cli`：PASS
-   - `virdeck/adapters/mygonative`：PASS
-   - `virdeck/config`：PASS
-   - `virdeck/core/adb`：PASS
-   - `virdeck/core/emu`：PASS
-   - `virdeck/core/instance`：PASS
-   - `virdeck/core/screenlayout`：PASS
-   - `virdeck/core/service`：PASS
-   - `virdeck/scripts/package`：PASS
-   - `virdeck/core/catalog` 与 `virdeck/core/downloader`（核心解压/Zip Slip防御/XML解析/数据迁移测试）：全部 PASS。
+### （一）第一阶段：安全基线直接修复（F-01 ～ F-17）
 
----
+1. **下载、压缩包与目录安全（F-01, F-02, F-07, F-08）**
+   - **解压炸弹与权限防护**（[`core/downloader/downloader.go`](../core/downloader/downloader.go)）：`ExtractZipAtomically` 与 `ExtractArchiveAtomically` 新增条目上限（`100,000`）、累计解压上限（`16 GiB`）及符号链接目标上限（`64 KiB`）；`.tar.gz` 转换阶段提前调用 `safeArchivePath`；`extractSingleZipEntry` 将写入权限掩码为 `mode.Perm() & 0o755`，剥离全局可写位，直接复用预检阶段读取的链接目标避免二次打开，并改用 `os.MkdirTemp` 随机临时目录。
+   - **协议降级与续传防护**（[`core/downloader/downloader.go`](../core/downloader/downloader.go)、[`core/catalog/catalog.go`](../core/catalog/catalog.go)）：`httpClient` 增加 `CheckRedirect` 拦截 `https -> http` 降级重定向与非 `http/https` 协议重定向；`Download`、`SaveCustom` 与 `ParseRepositoryXMLForHost` 强制校验 `http`/`https` 协议并在 `https` 索引下拒绝降级至 `http`；HTTP `416` 仅在 `offset > 0` 时允许单次重试（消除无限递归）；`.meta` 校验 URL 一致性且仅写入脱敏 URL（`0o600`）；校验 `Content-Range` 与 `16 GiB` 下载上限（含 `int64` 溢出检查）。
+   - **目录校验与原子写盘**（[`core/catalog/catalog.go`](../core/catalog/catalog.go)、[`core/instance/registry.go`](../core/instance/registry.go)、[`core/service/bootstrap.go`](../core/service/bootstrap.go)）：`SaveCustom` 校验 `android-` 前缀与合法 URL，`isSafePackageSegment` 拦截 ASCII 控制字符与尾随 `.`/空格，`saveLocked` 等持久化逻辑统一采用 `os.CreateTemp` + `Chmod(0o600)` + `Sync` + `Rename`；`Catalog.List` 在官方更新替换 URL 且无新 SHA-256 时清空旧 SHA-256，避免校验错配。
 
-## 五、已采纳的后续决议（纳入下个小版本 TODO）
+2. **代理与 URL 凭据全链路脱敏（F-06）**
+   - **位置**：[`config/redact.go`](../config/redact.go)、[`core/downloader/downloader.go`](../core/downloader/downloader.go)、[`core/service/bootstrap.go`](../core/service/bootstrap.go)、[`core/service/manager.go`](../core/service/manager.go)、[`adapters/mygonative/`](../adapters/mygonative/app.go)、[`adapters/cli/cli.go`](../adapters/cli/cli.go)、[`cmd/app/main.go`](../cmd/app/main.go)、[`cmd/cli/main.go`](../cmd/cli/main.go)
+   - **改动**：修复 `RedactProxyURL` 回退分支与 `scrubEmbeddedCreds` 在密码含未编码 `/`、`?`、`#` 时截断漏脱敏的问题；修正 `RedactError` 保留外层包装上下文；新增并导出 `RedactText`，覆盖日志、运行事件、`inst.LastError`、UI 吐司/剪贴板复制、网络报错以及 CLI/启动弹窗异常信息。
 
-### 1. 组件下载校验和策略与 SHA-256 升级支持（SEC-09 · 采纳方案 A）
+3. **ADB 命令注入/内存上限与 APK 解析防护（F-04, F-05）**
+   - **ADB 边界加固**（[`core/adb/adb.go`](../core/adb/adb.go)、[`core/adb/transfer.go`](../core/adb/transfer.go)）：包名与组件名校验引入严格正则（`validPackageRe` / `validComponentRe`），阻断 `;`、`$(...)`、`|`、反引号等 shell 元字符，对含 `$` 的合法组件名使用 `transferQuote` 引用；`runBytes` 限制响应上限为 `32 MiB`，防范恶意 guest 输出打爆宿主机内存；`TransferReceive` 拒绝 `-` 开头本地路径并规范化为绝对路径。
+   - **APK / Split Bundle 防炸弹**（[`core/apk/apk.go`](../core/apk/apk.go)）：`parseStringPool` 按偏移缓存去重并限定总解码字节 `16 MiB`，消除 AXML 字符串池别名 OOM 炸弹并修复 32 位整数溢出检查；`inspectSplitBundle` 与 `extractSplitBundle` 限定最多 `4096` 条目、最多读取 1 个 `manifest.json`、校验 `package_name` 格式，并在 `copyZipEntryToFile` 严格累计检查 `2 GiB` 解压总上限。
 
-- **涉及位置**：
-  - [`core/downloader/downloader.go:155-165, 309-324, 336-353`](../core/downloader/downloader.go)
-  - [`config/defaults.json:30, 147, 151, 155, 159, 163`](../config/defaults.json)
-- **现状分析**：
-  1. **单一弱哈希校验**：下载模块目前仅实现了基于 `crypto/sha1` 的 `VerifyFileSHA1` 校验逻辑，未支持更现代且抗碰撞的 SHA-256 算法。
-  2. **空哈希旁路跳过**：在 `Download` 函数中，若入参 `expectedSHA1 == ""`，程序在下载完成后会直接触发 `completed` 并返回文件路径，跳过任何数据完整性验证。
-  3. **预设与回退源缺乏哈希固定**：在 `defaults.json` 中配置的跨平台 `scrcpy` 兜底下载地址（例如 GitHub Release 预编译包），以及部分 Android 预设镜像项均未内置哈希。当官方 XML 索引抓取失败而降级到兜底源、或用户输入未提供校验和的自定义镜像时，程序将在无完整性校验的情况下直接调用 `ExtractArchiveAtomically` 解压部署。
-  4. **安全风险**：若用户处于不可信网络环境（如未加密 Wi-Fi、配置了第三方 HTTP/SOCKS 代理）或上游 CDN 遭受缓存污染/DNS 劫持，无哈希或仅依赖 SHA-1 的二进制包存在被中间人篡改或恶意投毒的潜在风险。
-- **方案比选**：
-  - **方案 A（保持向后兼容，已采纳）**：扩展下载器自适应支持 SHA-256 与 SHA-1；为内置预设组件补齐固定 SHA-256；界面对无哈希项增加「未提供校验和」醒目警示。
-  - **方案 B（严格拦截模式）**：强制所有下载必须配置校验和，无哈希一律阻断下载。但由于 Android 官方历史旧版 XML 仓库广泛使用 SHA-1，且自定义源常缺少哈希，强制阻断会导致大量正常功能不可用。
-- **落地内容（下个小版本优先实施）**：
-  - 下载模块扩充哈希校验算法：自动根据哈希字符串长度识别 SHA-256（64 位十六进制）与 SHA-1（40 位十六进制），实现自适应校验与断点续传验证。
-  - 为 [`config/defaults.json`](../config/defaults.json) 中预设的 `scrcpy` 跨平台发布包（`scrcpy-win64`、`scrcpy-macos`、`scrcpy-linux`）及推荐系统镜像补充官方固定的 SHA-256 校验和。
-  - 当用户输入自定义下载 URL 且未填写校验和时，在界面提示「未提供安全校验和」，防范非安全渠道的恶意镜像篡改。
+4. **备份还原 INI / qcow2 / config.ini / 元数据校验与防 UNC 泄露（F-03, F-09, F-15）**
+   - **AVD 压缩包安全还原与磁盘压缩**（[`core/emu/disk.go`](../core/emu/disk.go)）：`RestoreAVD` 限定 `4096` 条目与 `64 GiB` 解压体积上限；拦截含 `:`（NTFS ADS）、尾随 `.`/空格及 Windows 保留设备名条目；拒绝覆盖已存在 `avdDir`；验证 `target` 合法性并以 `cleanIniLine` 写 `<name>.ini` 防注入；解析 `.qcow2` 头部拦截恶意 `backing-filename`（`compactOneQcow2` 同步校验 `-B` 参数）；检查 `config.ini` 拒绝危险 `*.path` / `image.sysdir.*` 覆写；还原目录与文件权限统一收紧为 `0o700` / `0o600`。
+   - **元数据清洗与钳制**（[`core/service/backup_disk.go`](../core/service/backup_disk.go)）：还原时清洗 `InstanceName` 控制字符、钳制 `MemoryMB`（1024..16384）/ `Cores`（1..8）/ `StorageGB`（4..128），并严格校验 `SystemImage`、`Resolution`、`GPUMode`、`Note` 与 `Proxy` 格式。
+   - **保存框 UNC 防护**（[`adapters/mygonative/tools_modals.go`](../adapters/mygonative/tools_modals.go)）：新增 `sanitizeBackupFileStem`，防止还原来源的特殊实例名在 Windows 文件保存对话框触发 UNC SMB 外连泄露凭据。
 
-### 2. 依赖库升级与供应链治理（`golang.org/x/net`）（SEC-10 · 采纳方案 A）
+5. **模拟器启动校验、SOCKSBridge 治理、服务层竞态与私有权限落盘（F-08, F-10, F-12, F-16）**
+   - **模拟器进程与路径安全**（[`core/emu/emu.go`](../core/emu/emu.go)、[`core/emu/avd_native.go`](../core/emu/avd_native.go)、[`core/emu/proc_windows.go`](../core/emu/proc_windows.go)、[`core/emu/winpath_windows.go`](../core/emu/winpath_windows.go)）：`StartProcess` 校验 `AVDName`、allowlist `GPUMode`、合法 `Proxy`（无前导 `-`/控制字符）与 `DNSServer` IP；`CreateAVDWithOptions` 消除对 `c.sdkRoot` 的并发写竞态；`isSafePathSegment` 拦截前导 `-` 与全控制字符；`forceKillTree` 优先定位 `%SystemRoot%\System32\taskkill.exe`；`winpath_windows.go` 校验 reparse 缓冲区长度上限；非 Windows 平台 `.android` 目录收敛为 `0o700`。
+   - **本地代理桥接治理**（[`core/emu/socks_bridge.go`](../core/emu/socks_bridge.go)）：配置 `ReadHeaderTimeout`、`IdleTimeout`、`MaxHeaderBytes` 与 `256` 并发连接上限；追踪所有劫持连接并在 `Close()` 时主动清理；拦截自回环目标（`127.0.0.1` / `localhost` 等回环连接桥接自身），剔除 RFC 9110 hop-by-hop 请求/响应头，并校验 SOCKS5 认证响应版本字节 `0x01`。
+   - **服务层原子化与锁管理**（[`core/service/manager.go`](../core/service/manager.go)、[`core/service/cleanup.go`](../core/service/cleanup.go)、[`core/service/groups.go`](../core/service/groups.go)、[`core/service/screens.go`](../core/service/screens.go)、[`core/service/tools.go`](../core/service/tools.go)）：遗留 `instances.json` 迁移从相对当前工作目录（CWD）改为绑定可执行文件所在目录、先校验 JSON 有效性并以 `0o600` 原子写入（F-10）；`DeleteSystemImage` 改用 `os.OpenRoot` 并加锁防并发删用；`CleanCaches` 重开目录前执行二次 `os.Lstat` 防符号链接替换；`Manager.Delete` 与 `startOne` 补全互斥占位与失败回滚；`ADBServerPort` 增加 `<= 65535` 校验；所有配置 JSON 与截图统一通过随机临时文件 + `0o600` 权限原子替换。
 
-- **涉及位置**：
-  - [`go.mod:13`](../go.mod)
-- **现状分析**：
-  1. **依赖链路与版本现状**：项目通过 GUI 框架 `github.com/egoist/mygo v0.8.3` 间接引入了 `golang.org/x/net v0.59.0`。
-  2. **实际调用与攻击面评估**：对整个项目及依赖树的代码审查表明，实际被编译进入最终可执行文件的仅有 `golang.org/x/net/publicsuffix` 包（用于解析域名的有效顶级后缀列表 eTLD+1，属于纯内存静态算法与数据查找表）。
-  3. **无活跃网络攻击面**：项目中**未引入或调用** `golang.org/x/net` 中涉及 HTTP/2 协议栈（如历史上的 Rapid Reset 漏洞）、Web 代理或 HTML 解析等曾报告过高危 DoS/溢出的网络模块，因此当前该间接依赖在运行时处于**只读数据解析状态，攻击面不可达**。
-  4. **离线构建约束**：本地 Go 模块缓存虽已有 `v0.62.0`（2026-10-27 发布），但由于当前构建处于无外部网络环境，执行 `go get` / `go mod tidy` 会尝试请求上游 `proxy.golang.org` 校验索引而导致网络超时。
-- **方案比选**：
-  - **方案 A（联网时常规升级，已采纳）**：在下一次发版维护或有外网网络连接时，执行 `go get golang.org/x/net@v0.62.0` 并运行 `go mod tidy` 完成供应链版本收敛，消除依赖扫描误报。
-  - **方案 B（暂不升级）**：由于当前运行时攻击面不可达，保持当前版本在功能和安全性上亦满足安全运行要求。
-- **落地内容（下个小版本优先实施）**：
-  - 在下一次外网环境发版或依赖常规维护时，执行 `go get golang.org/x/net@v0.62.0` 并运行 `go mod tidy`。
-  - 持续保持直接依赖与间接依赖的清晰划分（已在本次修复中将 `purego` 和 `golang.org/x/text` 正式声明为直接依赖）。
+6. **同步输入端口收敛、macOS 辅助功能空指针防护与 UI/打包/CI 加固（F-11, F-13, F-14, F-17）**
+   - **同步输入通道与捕获**（[`core/syncinput/scrcpy_channel.go`](../core/syncinput/scrcpy_channel.go)、[`core/syncinput/capture_windows.go`](../core/syncinput/capture_windows.go)、[`core/syncinput/broadcaster.go`](../core/syncinput/broadcaster.go)、[`core/service/syncinput.go`](../core/service/syncinput.go)）：`DialScrcpyControl` 校验 `ServerVersion` 正则、钳制分辨率、优先使用 `adb forward tcp:0` 且建连后立即移除转发端口，消除长期暴露的无认证本地监听；`capture_windows.go` 使用 `atomic.Pointer` 消除数据竞争、`PeekMessageW` 确保队列就绪防 `Stop()` 死锁、通过 `SetMasterScope` 收敛捕获范围至主控前台窗口；`service/syncinput.go` 串行化启停操作；`Broadcaster` 释放 `b.mu` 后执行耗时广播，避免单台从机卡死导致全局死锁。
+   - **macOS 窗口操作保护**（[`core/screenlayout/native_darwin.go`](../core/screenlayout/native_darwin.go)、[`core/screenlayout/close_darwin.go`](../core/screenlayout/close_darwin.go)）：新增空安全 `cfRelease` 与零句柄/`utf8.ValidString` 校验，避免 `CFRelease(0)` 导致原生崩溃。
+   - **UI / 打包 / CI 细节**（[`adapters/mygonative/`](../adapters/mygonative/app.go)、[`scripts/package/main.go`](../scripts/package/main.go)、[`cross-platform.yml`](../.github/workflows/cross-platform.yml)）：显式设置 `DevToolsDisabled`；`appendLog` 限长 `8192` 字节并清洗控制字符；`openLocalDir` 校验本地绝对目录并拒绝 UNC 与非目录路径；`refreshAppsList` 增加 `appsSeq` 防过期列表覆写；`scripts/package/main.go` 校验全部文件复制与写入错误；CI `native` Job 添加 `persist-credentials: false` 与 `--title="$TITLE"`。
+
+### （二）第二阶段：第一档迁移落地（D-01 / D-03 / D-04 UI&CLI / D-05 务实版 / D-07 极简版 / S-01）
+
+1. **`D-01`（工具链与依赖升级）**：
+   - 升级 [`go.mod`](../go.mod) 与 [`go.sum`](../go.sum) 至 Go `1.27.4`、`purego v0.11.3`、`x/text v0.44.0`、`x/image v0.48.0`、`x/net v0.63.0`，并更新 [`README.md`](../README.md) 与 [`development.md`](../docs/development.md) 版本说明；二进制扫描消除 `GO-2026-6859`（`CVE-2026-97054`）。
+2. **`D-03`（备份/还原代理凭据默认脱敏与显式开关）**：
+   - 在 [`core/service/types.go`](../core/service/types.go) 新增 `BackupOptions` / `RestoreOptions`（含 `IncludeProxy`）及 `*WithOptions` 接口方法；[`core/service/backup_disk.go`](../core/service/backup_disk.go) 默认不导出、也不自动继承备份内的 `Proxy`，仅当显式开启 `IncludeProxy: true` 时处理且仍走严格格式校验。
+   - 在 [`adapters/cli/cli.go`](../adapters/cli/cli.go) 为 `backup` / `restore` 增加 `-include-proxy` 开关（默认 `false`）；在 GUI（[`tools_modals.go`](../adapters/mygonative/tools_modals.go)、[`shell.go`](../adapters/mygonative/shell.go)、[`page_workbench.go`](../adapters/mygonative/page_workbench.go)）新增备份/还原确认弹窗及默认未勾选的代理开关，防范分享备份包泄密或导入第三方备份包时被劫持代理。
+3. **`D-04`（仅 UI 掩码与 CLI 环境变量/stdin 部分）**：
+   - 在 [`adapters/mygonative/edit.go`](../adapters/mygonative/edit.go) 新增 `proxyTextInput`，默认调用 `mygo/ui` 的 `.Password()` 掩码显示代理 URL 并提供“显示/隐藏”切换按钮（同时保留完整单行粘贴 `http://user:pass@host:port` 体验），覆盖新建实例（[`app.go`](../adapters/mygonative/app.go)）、编辑实例（[`edit.go`](../adapters/mygonative/edit.go)）、批量改代理（[`app.go`](../adapters/mygonative/app.go)）与全局下载代理设置（[`page_settings.go`](../adapters/mygonative/page_settings.go)），并在每次打开弹窗/设置页时自动重置为隐藏状态。
+   - 在 [`adapters/cli/cli.go`](../adapters/cli/cli.go) 为 `create` 与 `proxy` 新增 `-proxy-stdin` 与 `VIRDECK_PROXY` 环境变量读取（`resolveCLIProxy` 校验长度不超过 `4096` 字节、拒绝换行与 `\x00`、禁止与命令行参数冲突，且显式传 `-url ""` 仍可清空代理）。
+4. **`D-05`（务实版：缓存隔离、防无校验复用与镜像兜底收敛）**：
+   - [`core/downloader/downloader.go`](../core/downloader/downloader.go) 新增 `cacheFileName`（以脱敏后完整 URL 的 SHA-256 前 8 位十六进制为前缀），隔离不同 URL 的同名压缩包与 `.part`/`.meta` 缓存；当未提供 `expectedChecksum` 时禁止直接复用本地旧文件，强制清除旧缓存并重新拉取。
+   - [`config/defaults.json`](../config/defaults.json) 仅对收藏预设中的固定镜像保留带官方 SHA-1 的直链兜底，将其余非收藏预设（`system-images;android-33;google_apis_playstore;x86_64` 与存在失效 `x86_64-34_r08.zip` 链接的 `system-images;android-34;default;x86_64`）统一清空为 `"url": ""`，下载时强制先从官方 `sys-img2-3.xml` 获取实时有效链接与官方校验和，消除失效与无校验和镜像直链。
+5. **`D-07`（极简版：禁止自动执行仓库内可执行文件）**：
+   - [`scripts/icongen/main.go`](../scripts/icongen/main.go) 移除优先运行工作区内 `scripts/icongen/go-winres.exe` 的逻辑，仅使用系统 `PATH` 中的 `go-winres` 或版本锁定的 `go run github.com/tc-hib/go-winres@v0.3.3`，避免污染主 `go.mod` 依赖树。
+6. **`S-01`（ADB 传输与投屏参数边界加固）**：
+   - [`core/adb/transfer.go`](../core/adb/transfer.go) 中 `TransferSend` 改用 `transferWindowsKey` 对目标文件名执行大小写不敏感去重（消除 Linux/macOS 向 Android `/sdcard` 同时推送 `Photo.jpg` 与 `photo.jpg` 时的覆盖 Bug）；`TransferList` 对非空返回严格校验成对字段与尾部 `\x00` 结束符，拒绝 `.`/`..`/空名称及含 `/` 条目。
+   - [`core/emu/screens.go`](../core/emu/screens.go) 将 `scrcpy` 标题传参改为 `--window-title=<title>` 单参数形式，隔离后续参数解析边界。
 
 ---
 
-## 六、剩余风险与后续加固建议
+## 四、暂缓项、已知限制与后续建议
 
-1. **GitHub Actions 供应链加固（Commit SHA Pinning）**：
-   - 建议后续将 [`.github/workflows/cross-platform.yml`](../.github/workflows/cross-platform.yml) 中引用的第三方法定 Action（如 `softprops/action-gh-release`、`actions/checkout`）固定为完整的 40 位 Git Commit SHA，规避上游标签被恶意篡改的供应链投毒风险。
-2. **离线漏洞库扫描建议**：
-   - 可以在具有外网访问的 CI 环境中定期运行官方 `govulncheck ./...`，自动与 Go 官方漏洞库同步，及时捕获最新漏洞公告。
-3. **敏感凭据脱敏呈现**：
-   - 建议在日志和状态通知（如 [`core/service/manager.go`](../core/service/manager.go)）中，若代理 URL 包含用户名和密码，通过 `url.UserPassword` 形式输出时将密码替换为 `***`，避免在 UI 提示或调试日志中暴露代理密钥。
+1. **`D-02`：Windows 多用户环境下 `%PUBLIC%` 路径暴露（已暂缓，已知限制）**
+   - [`winpath_common.go`](../core/emu/winpath_common.go) 与 [`winpath_windows.go`](../core/emu/winpath_windows.go) 在非 ASCII 用户名且短路径不可用时仍会回退至 `%PUBLIC%\VirDeckData` 或 `%PUBLIC%\VirDeckLinks`。由于中文用户名在 `%LOCALAPPDATA%` 场景不满足模拟器纯 ASCII 要求，且本项目主要面向个人单机 PC 使用，高复杂度的每用户 `<UserSID>` + Win32 NTFS DACL 迁移已暂缓。**使用提示**：切勿在多用户共享 Windows 主机 / 公共云桌面环境下使用 `%PUBLIC%` 作为数据或联接目录。
+2. **`D-04` 遗留部分：带认证的非 SOCKS5 HTTP 代理进程命令行可见**
+   - 当为实例配置 `http://user:pass@host`（非 `socks5://`）时，启动模拟器仍通过 `-http-proxy` 参数将完整 URL 传递给 `emulator` 进程，同机具有进程枚举权限的用户或 EDR 启动审计日志仍可能读到命令行中的凭据。如在多用户主机或严格进程审计环境下运行带密码代理，建议改用 `socks5://`（自动走仅绑定 `127.0.0.1` 的本地无鉴权桥接端口）或按需将本地桥接扩展支持上游 HTTP 代理。
+3. **`D-05` 校验策略保留项：[`config/defaults.json`](../config/defaults.json) 中的滚动工具与 XML 校验机制**
+   - 预设系统镜像中的所有非空固定直链均已附带官方 SHA-1 校验和；非收藏条目已清空 `"url"` 以按需从 Google 官方 `sys-img2-3.xml` 获取最新有效地址与 SHA-1。
+   - 滚动更新链接 `platform-tools-latest-{windows,darwin,linux}.zip` 刻意不绑定静态 SHA-256，以避免 Google 发版后立即破坏兜底下载；正常情况下优先从 HTTPS 的 `repository2-3.xml` 获取官方动态 SHA-1 校验和。
+4. **`D-06`：`TransferReceive` 设备侧 TOCTOU（按风险权衡维持现状）**
+   - `TransferReceive` 采用 `find` 校验树结构后再 `adb pull` 至 [`core/service/transfer.go`](../core/service/transfer.go) 创建的独立 `VirDeck-export-*` 临时目录。考虑到在 Android 7.1–14 全版本切换 `adb exec-out tar` 存在显著的 `toybox tar` 兼容性风险，而现有隔离导出目录已封堵覆写宿主机其他路径的风险，因此维持现状。
+5. **持续安全工程建议**
+   - 在 CI 中引入固定版本的 `govulncheck` 或 `osv-scanner` 检查。
+   - 若外部工具升级或替换 `scrcpy`，保持在 `v3.3.3` 以上版本（当前 `defaults.json` 已指向 `v5.0.1`），持续规避历史已知缺陷（`CVE-2025-34449`）。
+   - 后续如增加远程配置同步或扩展能力，继续坚持纯原生 Canvas 渲染架构，避免开放远程 WebView 与脚本绑定。
+
+---
+
+## 五、验证与回归测试记录
+
+### 1. 安全回归与新增单元测试
+
+- [`config/redact_test.go`](../config/redact_test.go)：覆盖含特殊字符代理密码的 `RedactProxyURL`、`RedactError` 与 `RedactText`。
+- [`core/downloader/downloader_test.go`](../core/downloader/downloader_test.go)：覆盖 HTTPS 降级拒绝、HTTP `416` 防无限递归、SHA-256 校验、POSIX 掩码、URL 哈希缓存隔离及禁止无校验缓存复用。
+- [`core/adb/adb_test.go`](../core/adb/adb_test.go) 与 [`core/adb/transfer_test.go`](../core/adb/transfer_test.go)：覆盖包名/组件名注入拦截、导出内存上限、大小写不敏感发送去重及 `TransferList` 严格 `\x00` 帧校验。
+- [`core/apk/apk_test.go`](../core/apk/apk_test.go)：覆盖 AXML 字符串池别名防 OOM 炸弹与 Split Bundle 条目限制。
+- [`core/emu/disk_test.go`](../core/emu/disk_test.go) 与 [`core/emu/screens_test.go`](../core/emu/screens_test.go)：覆盖 `RestoreAVD` 炸弹/ADS/保留名/qcow2/INI 防护与 `--window-title=` 传参。
+- [`core/service/tools_test.go`](../core/service/tools_test.go)、[`adapters/cli/p3b_cli_test.go`](../adapters/cli/p3b_cli_test.go) 与 [`adapters/mygonative/p3b_test.go`](../adapters/mygonative/p3b_test.go)：覆盖备份/还原代理凭据默认脱敏策略、`-include-proxy`、`VIRDECK_PROXY` / `-proxy-stdin`、UI 代理输入框掩码切换以及日志清洗/目录校验（[`app_test.go`](../adapters/mygonative/app_test.go)）。
+
+### 2. 最近一次完整验证（全部退出码 `0`）
+
+- 静态检查与多平台构建：`go vet ./...`、`go build -o NUL ./cmd/app`、`go build -o NUL ./cmd/cli`、`GOOS=darwin GOARCH=arm64 go build ./core/screenlayout` 均通过。
+- 全包单元测试：
+  - `virdeck/adapters/cli`、`virdeck/adapters/mygonative`、`virdeck/config`、`virdeck/core/adb`、`virdeck/core/apk`、`virdeck/core/instance`、`virdeck/core/screenlayout`、`virdeck/core/syncinput`、`virdeck/scripts/package` 全部 `PASS`（`scripts/icongen` 无测试文件）。
+  - `virdeck/core/catalog`、`virdeck/core/downloader`、`virdeck/core/emu`、`virdeck/core/service`（非沙盒环境运行回环网络与 NTFS Junction 测试）全部 `PASS`。
+- 二进制漏洞扫描：基于 Go `1.27.4` 编译 `./cmd/app` 并运行 `govulncheck@v1.10.0 -mode binary`，结果为 `No vulnerabilities found.`。

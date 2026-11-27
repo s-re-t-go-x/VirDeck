@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -41,10 +42,20 @@ type ImageItem struct {
 	Source      SourceType `json:"source"`
 	URL         string     `json:"url,omitempty"`
 	SHA1        string     `json:"sha1,omitempty"`
+	SHA256      string     `json:"sha256,omitempty"`
+	ARMCompat   ARMCompat  `json:"armCompat,omitempty"`
 	Size        int64      `json:"size,omitempty"`
 	Revision    string     `json:"revision,omitempty"`
 	Installed   bool       `json:"installed"`
 	InstallDir  string     `json:"installDir,omitempty"`
+}
+
+// EffectiveChecksum returns the preferred checksum for the image (SHA-256 over SHA-1).
+func (it ImageItem) EffectiveChecksum() string {
+	if s := strings.TrimSpace(it.SHA256); s != "" {
+		return s
+	}
+	return strings.TrimSpace(it.SHA1)
 }
 
 type favorite struct {
@@ -80,7 +91,7 @@ func BuiltinRecommended() []ImageItem {
 func recommended(defaults config.Defaults) []ImageItem {
 	var out []ImageItem
 	for _, p := range defaults.Images {
-		out = append(out, ImageItem{ID: p.ID, Name: p.Name, APILevel: p.APILevel, TagID: p.TagID, ABI: p.ABI, URL: p.URL, SHA1: p.SHA1, Source: SourceRecommended})
+		out = append(out, ImageItem{ID: p.ID, Name: p.Name, APILevel: p.APILevel, TagID: p.TagID, ABI: p.ABI, URL: p.URL, SHA1: p.SHA1, SHA256: p.SHA256, Source: SourceRecommended})
 	}
 	return out
 }
@@ -171,21 +182,44 @@ func (s *Store) saveLocked() error {
 	if s.filePath == "" {
 		return nil
 	}
-	if err := os.MkdirAll(filepath.Dir(s.filePath), 0o755); err != nil {
+	dir := filepath.Dir(s.filePath)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
 	raw, err := json.MarshalIndent(s.data, "", "  ")
 	if err != nil {
 		return err
 	}
-	tmp := s.filePath + ".tmp"
-	if err := os.WriteFile(tmp, raw, 0o644); err != nil {
+	f, err := os.CreateTemp(dir, ".images_catalog-*.tmp")
+	if err != nil {
+		return err
+	}
+	tmp := f.Name()
+	cleanup := true
+	defer func() {
+		if cleanup {
+			_ = os.Remove(tmp)
+		}
+	}()
+	if err := f.Chmod(0o600); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if _, err := f.Write(raw); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
 		return err
 	}
 	if err := os.Rename(tmp, s.filePath); err != nil {
-		_ = os.Remove(tmp)
 		return err
 	}
+	cleanup = false
 	return nil
 }
 
@@ -215,10 +249,16 @@ func (s *Store) List(installedPackages []string) []ImageItem {
 	for _, rec := range recommended(s.defaults) {
 		if off, ok := officialByID[rec.ID]; ok {
 			if off.URL != "" {
+				if off.URL != rec.URL && off.SHA256 == "" {
+					rec.SHA256 = ""
+				}
 				rec.URL = off.URL
 			}
 			if off.SHA1 != "" {
 				rec.SHA1 = off.SHA1
+			}
+			if off.SHA256 != "" {
+				rec.SHA256 = off.SHA256
 			}
 			if off.Size > 0 {
 				rec.Size = off.Size
@@ -291,9 +331,16 @@ func (s *Store) List(installedPackages []string) []ImageItem {
 		if isPrerelease(item) {
 			continue
 		}
+		apiDir, tagFromID, abiFromID := SplitPackageID(item.ID)
 		abi := item.ABI
 		if abi == "" {
-			_, _, abi = SplitPackageID(item.ID)
+			abi = abiFromID
+		}
+		if item.APILevel == "" && apiDir != "" {
+			item.APILevel = strings.TrimPrefix(apiDir, "android-")
+		}
+		if item.TagID == "" && tagFromID != "" {
+			item.TagID = tagFromID
 		}
 		if (item.Source == SourceRecommended || item.Source == SourceOfficial) && !s.compatibleABI(abi) && !item.Installed {
 			continue
@@ -301,6 +348,7 @@ func (s *Store) List(installedPackages []string) []ImageItem {
 		if item.Source == SourceOfficial {
 			item.Name = officialImageName(item.APILevel, item.TagID)
 		}
+		item.ARMCompat = ImageARMCompat(item.APILevel, item.TagID, abi)
 		pref, ok := s.data.Favorites[item.ID]
 		item.Favorite, item.Note = ok, pref.Note
 		filtered = append(filtered, item)
@@ -334,7 +382,7 @@ func (s *Store) SaveCustom(item ImageItem) error {
 		return errors.New("系统镜像包 ID 不能为空（例如 system-images;android-34;google_apis_playstore;x86_64）")
 	}
 	api, tag, abi := SplitPackageID(item.ID)
-	if api == "" || tag == "" || abi == "" {
+	if api == "" || tag == "" || abi == "" || !strings.HasPrefix(api, "android-") {
 		return errors.New("镜像包 ID 格式应为 system-images;android-<API>;<tag>;<abi>")
 	}
 	item.APILevel = strings.TrimPrefix(api, "android-")
@@ -345,7 +393,27 @@ func (s *Store) SaveCustom(item ImageItem) error {
 		item.Name = fmt.Sprintf("自定义 Android %s (%s)", item.APILevel, item.TagID)
 	}
 	item.URL = strings.TrimSpace(item.URL)
+	if item.URL != "" {
+		parsedURL, err := url.Parse(item.URL)
+		if err != nil || parsedURL.Host == "" || (strings.ToLower(parsedURL.Scheme) != "http" && strings.ToLower(parsedURL.Scheme) != "https") {
+			return errors.New("自定义镜像下载 URL 仅支持合法的 http:// 或 https:// 地址")
+		}
+	}
 	item.SHA1 = strings.TrimSpace(item.SHA1)
+	item.SHA256 = strings.TrimSpace(item.SHA256)
+	if item.SHA256 == "" && len(item.SHA1) == 64 {
+		item.SHA256 = item.SHA1
+		item.SHA1 = ""
+	}
+	if err := downloader.ValidateChecksumFormat(item.SHA256); err != nil {
+		return err
+	}
+	if err := downloader.ValidateChecksumFormat(item.SHA1); err != nil {
+		return err
+	}
+	if err := downloader.ValidateChecksumFormat(item.EffectiveChecksum()); err != nil {
+		return err
+	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -472,11 +540,13 @@ func SplitPackageID(pkgID string) (apiDir, tag, abi string) {
 }
 
 func isSafePackageSegment(seg string) bool {
-	if seg == "" || seg == "." || seg == ".." {
+	if seg == "" || seg == "." || seg == ".." || strings.TrimRight(seg, ". ") != seg {
 		return false
 	}
-	if strings.ContainsAny(seg, `/\:*?"<>|`+"\x00\r\n") {
-		return false
+	for _, r := range seg {
+		if r < 0x20 || r == 0x7f || strings.ContainsRune(`/\:*?"<>|`, r) {
+			return false
+		}
 	}
 	return true
 }

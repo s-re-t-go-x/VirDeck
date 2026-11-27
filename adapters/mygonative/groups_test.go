@@ -14,12 +14,9 @@ func TestGroupFilteringKeepsBatchScopeVisible(t *testing.T) {
 	vm := newTestVM(t)
 	vm.groups.snapshot = service.GroupSnapshot{Groups: []service.Group{{ID: "work", Name: "工作"}}, Memberships: map[string]string{"a1b2c3d4": "work"}}
 	vm.selected.Add("0a0b0c0d")
-	tester := ui.NewTester(vm.view, 610, 780)
+	tester := ui.NewTester(vm.view, 1180, 780)
 	tester.Frame()
-	if err := tester.Click("分组筛选"); err != nil {
-		t.Fatal(err)
-	}
-	if err := tester.Click("工作 (1)"); err != nil {
+	if err := tester.Click("工作"); err != nil {
 		t.Fatal(err)
 	}
 	tester.Frame()
@@ -32,7 +29,7 @@ func TestGroupFilteringKeepsBatchScopeVisible(t *testing.T) {
 }
 func TestGroupManagerCreatesRenamesDeletesMetadata(t *testing.T) {
 	vm := newTestVM(t)
-	tester := ui.NewTester(vm.view, 610, 480)
+	tester := ui.NewTester(vm.view, 1180, 780)
 	tester.Frame()
 	if err := tester.Click("管理分组"); err != nil {
 		t.Fatal(err)
@@ -72,11 +69,12 @@ func TestGroupFilterCountsAreIndependentOfStatusAndSearch(t *testing.T) {
 	vm.filterTab = 1
 	tester := ui.NewTester(vm.view, 1180, 780)
 	tester.Frame()
-	if err := tester.Click("分组筛选"); err != nil {
-		t.Fatal(err)
+	counts := vm.groupCounts()
+	if counts[""] != 4 || counts["work"] != 2 || counts[ungroupedFilter] != 2 {
+		t.Fatalf("wrong independent group counts: %+v", counts)
 	}
-	if !tester.HasText("工作 (2)") || !tester.HasText("未分组 (2)") || !tester.HasText("全部分组 (4)") {
-		t.Fatal("missing complete group counts")
+	if !tester.HasText("工作") || !tester.HasText("未分组") || !tester.HasText("全部分组") {
+		t.Fatal("missing group tree items in sidebar")
 	}
 }
 
@@ -95,9 +93,6 @@ func (s *groupingTestSvc) AssignGroup(_ context.Context, ids []string, id string
 	return nil
 }
 func (s *groupingTestSvc) Create(context.Context, service.CreateSpec) ([]service.Instance, error) {
-	return s.created, nil
-}
-func (s *groupingTestSvc) Clone(context.Context, string, int) ([]service.Instance, error) {
 	return s.created, nil
 }
 func TestNewGroupMoveRetryDoesNotCreateDuplicate(t *testing.T) {
@@ -161,43 +156,6 @@ func TestCreateInstanceInheritsAndFreezesSelectedGroup(t *testing.T) {
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("created device not assigned")
-	}
-	drainProjectionTask(t, vm, posts)
-}
-
-func TestCloneInstanceInheritsSourceGroup(t *testing.T) {
-	vm := newTestVM(t)
-	g, err := vm.svc.CreateGroup(context.Background(), "工作")
-	if err != nil {
-		t.Fatal(err)
-	}
-	vm.refreshGroups()
-	vm.groups.snapshot.Memberships = map[string]string{"0a0b0c0d": g.ID}
-	svc := &groupingTestSvc{Service: vm.svc, created: []service.Instance{{ID: "cloned-01", Name: "克隆设备"}}, assigned: make(chan string, 4)}
-	vm.svc = svc
-	posts := make(chan func(), 32)
-	vm.post = func(f func()) { posts <- f }
-	for _, inst := range vm.instances {
-		if inst.ID == "0a0b0c0d" {
-			vm.perform(actClone, []service.Instance{inst})
-			break
-		}
-	}
-	if vm.cloneGroupID != g.ID {
-		t.Fatalf("clone did not inherit source group: got %q want %q", vm.cloneGroupID, g.ID)
-	}
-	tester := ui.NewTester(vm.view, 610, 480)
-	tester.Frame()
-	if err := tester.Click("开始克隆"); err != nil {
-		t.Fatal(err)
-	}
-	select {
-	case got := <-svc.assigned:
-		if got != "cloned-01|"+g.ID {
-			t.Fatalf("wrong clone group %s", got)
-		}
-	case <-time.After(3 * time.Second):
-		t.Fatal("cloned device not assigned to group")
 	}
 	drainProjectionTask(t, vm, posts)
 }

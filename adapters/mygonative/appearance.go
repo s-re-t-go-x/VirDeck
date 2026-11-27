@@ -1,35 +1,77 @@
 package mygonative
 
 import (
-	"github.com/egoist/mygo/ui"
 	"runtime"
+
+	"github.com/egoist/mygo/ui"
 	"virdeck/assets"
 )
 
 var brandMark = ui.MustParseSVG(assets.IconSVG)
 
-// One palette for the workbench and all of its dialogs.
+// 「冷雾灰 · 深靛蓝」 (modern-blue) theme for the workbench and all dialogs.
 var workbenchTheme = func() *ui.Theme {
 	t := ui.LightTheme()
 	t.Background = ui.Hex("#ffffff")
-	t.Surface = ui.Hex("#f5f7fb")
-	t.SurfaceHover = ui.Hex("#edf0fa")
-	t.SurfacePressed = ui.Hex("#e4e8f7")
-	t.Border = ui.Hex("#e5eaf2")
-	t.Text = ui.Hex("#24364b")
-	t.TextMuted = ui.Hex("#7d8ba3")
-	t.Accent = ui.Hex("#5963df")
-	t.AccentHover = ui.Hex("#4d56cd")
-	t.AccentPressed = ui.Hex("#424bb9")
-	t.Selection = ui.Hex("#eef0ff")
-	t.Focus = ui.Hex("#a1a8ed")
-	t.Success = ui.Hex("#438b79")
-	t.Warning = ui.Hex("#b08a43")
-	t.Danger = ui.Hex("#c46570")
+	t.Surface = ui.Hex("#f1f4f9")
+	t.SurfaceHover = ui.Hex("#e7edf5")
+	t.SurfacePressed = ui.Hex("#dde5f0")
+	t.Border = ui.Hex("#e2e8f0")
+	t.Text = ui.Hex("#1e293b")
+	t.TextMuted = ui.Hex("#64748b")
+	t.Accent = ui.Hex("#4553cf")
+	t.AccentHover = ui.Hex("#3946be")
+	t.AccentPressed = ui.Hex("#2f3bab")
+	t.Selection = ui.Hex("#eff1fb")
+	t.Focus = ui.Hex("#8e97e6")
+	t.Success = ui.Hex("#15803d")
+	t.Warning = ui.Hex("#b45309")
+	t.Danger = ui.Hex("#be123c")
 	t.Font, t.FontSize = platformFont(runtime.GOOS), 13
-	t.Radius = 6
+	t.Radius = 7
 	return t
 }()
+
+// Extended surface, soft-pill, and overlay tokens for the native workbench.
+var workbenchPalette = struct {
+	ShellBg          ui.Color
+	CanvasBg         ui.Color
+	SubSurfaceBg     ui.Color
+	InteractiveBg    ui.Color
+	Hairline         ui.Color
+	StrongHairline   ui.Color
+	AccentSoftBg     ui.Color
+	AccentSoftBorder ui.Color
+	SuccessSoftBg    ui.Color
+	WarningSoftBg    ui.Color
+	WarningSoftEdge  ui.Color
+	DangerSoftBg     ui.Color
+	DangerSoftBorder ui.Color
+	StoppedSoftBg    ui.Color
+	FavCardBg        ui.Color
+	FavCardBorder    ui.Color
+	FavStar          ui.Color
+	ToastBg          ui.Color
+}{
+	ShellBg:          ui.Hex("#f1f4f9"),
+	CanvasBg:         ui.Hex("#ffffff"),
+	SubSurfaceBg:     ui.Hex("#f8fafc"),
+	InteractiveBg:    ui.Hex("#f1f5f9"),
+	Hairline:         ui.Hex("#e2e8f0"),
+	StrongHairline:   ui.Hex("#cbd5e1"),
+	AccentSoftBg:     ui.Hex("#eef0fc"),
+	AccentSoftBorder: ui.Hex("#c7ccf2"),
+	SuccessSoftBg:    ui.Hex("#e8f7ee"),
+	WarningSoftBg:    ui.Hex("#fdf4e3"),
+	WarningSoftEdge:  ui.Hex("#f3d9a8"),
+	DangerSoftBg:     ui.Hex("#fcebef"),
+	DangerSoftBorder: ui.Hex("#f7c4cf"),
+	StoppedSoftBg:    ui.Hex("#f1f5f9"),
+	FavCardBg:        ui.Hex("#fef9eb"),
+	FavCardBorder:    ui.Hex("#f5deb0"),
+	FavStar:          ui.Hex("#d97706"),
+	ToastBg:          ui.Hex("#1e293b"),
+}
 
 var workbenchIcons = func() map[string]*ui.SVG {
 	paths := map[string]string{
@@ -52,6 +94,12 @@ var workbenchIcons = func() map[string]*ui.SVG {
 		"network":  "M12 3v7 M4 21v-7h16v7 M12 14v7 M8 3h8v5H8z",
 		"volume":   "M11 5 6 9H2v6h4l5 4V5z M15.5 8.5a5 5 0 0 1 0 7 M19 5a10 10 0 0 1 0 14",
 		"mute":     "M11 5 6 9H2v6h4l5 4V5z M22 9l-6 6 M16 9l6 6",
+		"folder":   "M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z",
+		"logs":     "M4 6h16 M4 12h16 M4 18h10",
+		"check":    "M20 6 9 17l-5-5",
+		"alert":    "M12 9v4 M12 17h.01 M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h16.9a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z",
+		"package":  "m16.5 9.4-9-5.19 M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z M3.3 7 12 12l8.7-5 M12 22V12",
+		"menu":     "M4 7h16 M4 12h16 M4 17h16",
 	}
 	icons := make(map[string]*ui.SVG, len(paths))
 	for name, path := range paths {
@@ -106,8 +154,6 @@ func actionIcon(a action) string {
 		return "download"
 	case actShell:
 		return "terminal"
-	case actClone:
-		return "copy"
 	case actDelete:
 		return "trash"
 	case actProxy:
@@ -132,48 +178,27 @@ func activityStatus(s itemStatus) string {
 func (vm *viewModel) openSettings() {
 	st := vm.svc.GetSettings()
 	vm.settingsProxy, vm.settingsConcurrent = st.DownloadProxy, float64(st.MaxConcurrent)
+	vm.settingsProxyReveal = false
+	vm.settingsAutoDeleteDownloads = st.AutoDeleteDownloads
 	vm.settingsSavedHint = ""
 	vm.settingsProjection = projectionFormFrom(st.Projection)
 	vm.settingsTab = 0
-	vm.showSettings = true
-}
-
-func (vm *viewModel) buildSettingsModal(c *ui.Context) {
-	_, h := c.Size()
-	ui.Modal(c, &vm.showSettings, func() {
-		modalContent(c, 620).Padding(8).Gap(14).Children(func() {
-			ui.Row(c).Gap(10).Children(func() { glyph(c, "settings", 20).TextColor(c.Theme().Accent); ui.Text(c, "设置").FontSize(20).Bold() })
-			ui.Tabs(c, &vm.settingsTab, "常规", "投屏与声音")
-			ui.Scroll(c).Height(min(340, max(110, h-250))).Gap(12).Children(func() { vm.buildSettingsTab(c) })
-			ui.Row(c).Gap(8).Wrap().Children(func() {
-				ui.Spacer(c)
-				if ui.Button(c.Key("close_settings"), "关闭设置").Clicked() {
-					vm.showSettings = false
-				}
-				if vm.settingsTab == 1 && ui.Button(c.Key("save_settings_reopen"), "保存并重开已打开投屏").Disabled(vm.settingsRefreshing).Clicked() {
-					vm.saveGlobalAndReopen()
-				}
-				if ui.PrimaryButton(c.Key("save_settings"), "保存全局设置").Disabled(vm.settingsRefreshing).Clicked() {
-					vm.saveGlobalSettings()
-				}
-			})
-		})
-	})
+	vm.page = pageSettings
 }
 
 func (vm *viewModel) buildHelpModal(c *ui.Context) {
 	ui.Modal(c, &vm.showHelp, func() {
 		t := c.Theme()
-		modalContent(c, 540).Padding(8).Gap(18).Children(func() {
+		modalContent(c, 540).Padding(8).Gap(16).Children(func() {
 			ui.Text(c, "使用帮助").FontSize(20).Bold()
 			ui.Text(c, assets.Product.Name+" "+assets.Product.Version).FontSize(12).TextColor(t.TextMuted)
 			for _, section := range [][2]string{
-				{"开始使用", "在「镜像与环境」中安装组件和系统镜像，然后新建实例。"},
-				{"选择与批量操作", "勾选设备可多选，也可使用 Ctrl / Shift 点击列表。多选后，批量操作会出现在列表上方。"},
-				{"后台运行与投屏", "实例启动完成后，点击「投屏」打开操作画面。关闭投屏窗口后，实例仍在后台运行；点击「停止」结束运行。"},
-				{"两种代理", "「设置」中的代理用于下载组件；实例详情中的代理用于该设备联网，修改后重启实例生效。"},
+				{"开始使用", "在左侧「镜像与环境」中下载组件与系统镜像，然后新建实例。"},
+				{"统一安装与拖放", "可直接将单个 .apk / .apks / .xapk 拖入工作区或具体设备行安装并自动拉起；拖入普通文件将自动进入「文件传输」待发送队列。"},
+				{"后台运行与投屏", "无头模式实例支持按需打开 scrcpy 投屏窗口；关闭投屏窗口后实例仍在后台运行，点击「停止」结束运行。"},
+				{"网络代理与桥接", "「设置 → 常规与下载」中的代理用于下载 SDK 与镜像；实例代理支持 http:// 与 socks5://（本地桥接仅覆盖 TCP/HTTP 栈，不接管 UDP/QUIC）。"},
 			} {
-				ui.Column(c).Gap(6).Children(func() {
+				ui.Column(c).Gap(4).Children(func() {
 					ui.Text(c, section[0]).FontSize(12).Bold()
 					ui.Text(c, section[1]).FontSize(12).TextColor(t.TextMuted)
 				})
@@ -189,6 +214,23 @@ func (vm *viewModel) buildHelpModal(c *ui.Context) {
 			})
 		})
 	})
+}
+
+func softBadge(c *ui.Context, text string, fg, bg ui.Color) ui.Element {
+	return ui.Row(c).Padding(2, 8).Radius(6).Background(bg).Shrink(0).Children(func() {
+		ui.Text(c, text).FontSize(11).FontWeight(500).TextColor(fg).SingleLine()
+	})
+}
+
+func softBadgeWarnBorder(c *ui.Context, text string, fg, bg, edge ui.Color) ui.Element {
+	return ui.Row(c).Padding(2, 8).Radius(6).Background(bg).Border(1, edge).Shrink(0).Children(func() {
+		ui.Text(c, text).FontSize(11).FontWeight(500).TextColor(fg).SingleLine()
+	})
+}
+
+func detailCard(c *ui.Context, children func()) ui.Element {
+	return ui.Column(c).Padding(10).Radius(8).Background(workbenchPalette.CanvasBg).
+		Border(1, workbenchPalette.Hairline).Gap(5).Children(children)
 }
 
 // quietMenu keeps MyGo's hover, pressed, focus and menu handling intact.

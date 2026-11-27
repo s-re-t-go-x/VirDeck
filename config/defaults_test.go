@@ -11,6 +11,9 @@ import (
 )
 
 func TestEmbeddedDefaultsRejectInvalidData(t *testing.T) {
+	if Values.ScreenLayout.WindowTimeoutSeconds < 20 {
+		t.Fatalf("WindowTimeoutSeconds=%d too short for cold-booted scrcpy startup", Values.ScreenLayout.WindowTimeoutSeconds)
+	}
 	var raw map[string]any
 	if err := json.Unmarshal(builtin, &raw); err != nil {
 		t.Fatal(err)

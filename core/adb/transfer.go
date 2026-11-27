@@ -149,10 +149,10 @@ func (c *Client) TransferSend(ctx context.Context, port int, localPaths []string
 		name := filepath.Base(p)
 		base := strings.TrimSuffix(name, filepath.Ext(name))
 		ext := filepath.Ext(name)
-		for n := 2; used[name]; n++ {
+		for n := 2; used[transferWindowsKey(name)]; n++ {
 			name = fmt.Sprintf("%s (%d)%s", base, n, ext)
 		}
-		used[name] = true
+		used[transferWindowsKey(name)] = true
 		if _, err = c.transferRun(ctx, "-s", Serial(port), "push", abs, path.Join(dest, name)); err != nil {
 			return dest, fmt.Errorf("%s → %s: %w", p, dest, err)
 		}
@@ -168,6 +168,14 @@ func (c *Client) TransferSend(ctx context.Context, port int, localPaths []string
 }
 
 func (c *Client) TransferReceive(ctx context.Context, port int, remotePath, localDir string) error {
+	localDir = strings.TrimSpace(localDir)
+	if localDir == "" || strings.HasPrefix(localDir, "-") {
+		return errors.New("无效的本地导出目录")
+	}
+	absLocalDir, err := filepath.Abs(localDir)
+	if err != nil {
+		return fmt.Errorf("无效的本地导出目录: %w", err)
+	}
 	canonical, err := c.transferCanonical(ctx, port, remotePath)
 	if err != nil {
 		return err
@@ -183,7 +191,7 @@ func (c *Client) TransferReceive(ctx context.Context, port int, remotePath, loca
 	if err = validateTransferTree(canonical, manifest); err != nil {
 		return err
 	}
-	_, err = c.transferRun(ctx, "-s", Serial(port), "pull", canonical, localDir)
+	_, err = c.transferRun(ctx, "-s", Serial(port), "pull", canonical, absLocalDir)
 	return err
 }
 
@@ -272,13 +280,20 @@ func (c *Client) TransferList(ctx context.Context, port int, remoteDir string) (
 	if err != nil {
 		return nil, err
 	}
+	if out == "" {
+		return []TransferEntry{}, nil
+	}
 	fields := strings.Split(out, "\x00")
+	if len(fields)%2 != 1 || fields[len(fields)-1] != "" {
+		return nil, errors.New("ADB 目录列表格式异常")
+	}
 	entries := []TransferEntry{}
 	for i := 0; i+1 < len(fields); i += 2 {
-		if (fields[i] != "d" && fields[i] != "f") || strings.Contains(fields[i+1], "/") {
+		name := fields[i+1]
+		if (fields[i] != "d" && fields[i] != "f") || name == "" || name == "." || name == ".." || strings.Contains(name, "/") {
 			return nil, errors.New("ADB 目录列表格式异常")
 		}
-		entries = append(entries, TransferEntry{Name: fields[i+1], IsDir: fields[i] == "d"})
+		entries = append(entries, TransferEntry{Name: name, IsDir: fields[i] == "d"})
 	}
 	return entries, nil
 }

@@ -62,21 +62,24 @@ func writeArchive(dest, folder string, files []packageFile) (err error) {
 	return nil
 }
 
-func copyFile(src, dst string) {
+func copyFile(src, dst string) error {
 	if src == dst {
-		return
+		return nil
 	}
 	in, err := os.Open(src)
 	if err != nil {
-		return
+		return err
 	}
 	defer in.Close()
 	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0755)
 	if err != nil {
-		return
+		return err
 	}
-	defer out.Close()
-	_, _ = io.Copy(out, in)
+	if _, err := io.Copy(out, in); err != nil {
+		_ = out.Close()
+		return err
+	}
+	return out.Close()
 }
 
 func build(goos, arch, output, pkg string, gui bool) error {
@@ -150,15 +153,20 @@ func run() error {
 		verTag := "v" + strings.TrimPrefix(assets.Product.Version, "v")
 		appRoot := filepath.Join(*output, fmt.Sprintf("%s-%s-%s-%s.app", assets.Product.Name, verTag, *goos, *arch))
 		macOSDir := filepath.Join(appRoot, "Contents", "MacOS")
-		if err := os.MkdirAll(macOSDir, 0755); err == nil {
-			copyFile(guiPath, filepath.Join(macOSDir, "VirDeck"))
-			plist := `<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd"><plist version="1.0"><dict>` +
-				`<key>CFBundleName</key><string>` + xmlText(assets.Product.Name) + `</string><key>CFBundleDisplayName</key><string>` + xmlText(assets.Product.Name) + `</string>` +
-				`<key>CFBundleExecutable</key><string>VirDeck</string><key>CFBundleIdentifier</key><string>io.virdeck.app</string>` +
-				`<key>CFBundlePackageType</key><string>APPL</string><key>CFBundleShortVersionString</key><string>` + xmlText(assets.Product.Version) + `</string>` +
-				`<key>CFBundleVersion</key><string>` + xmlText(assets.Product.Version) + `</string><key>NSHighResolutionCapable</key><true/>` +
-				`<key>NSAppleEventsUsageDescription</key><string>Manage projection windows.</string></dict></plist>`
-			_ = os.WriteFile(filepath.Join(appRoot, "Contents", "Info.plist"), []byte(plist), 0644)
+		if err := os.MkdirAll(macOSDir, 0755); err != nil {
+			return err
+		}
+		if err := copyFile(guiPath, filepath.Join(macOSDir, "VirDeck")); err != nil {
+			return err
+		}
+		plist := `<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd"><plist version="1.0"><dict>` +
+			`<key>CFBundleName</key><string>` + xmlText(assets.Product.Name) + `</string><key>CFBundleDisplayName</key><string>` + xmlText(assets.Product.Name) + `</string>` +
+			`<key>CFBundleExecutable</key><string>VirDeck</string><key>CFBundleIdentifier</key><string>io.virdeck.app</string>` +
+			`<key>CFBundlePackageType</key><string>APPL</string><key>CFBundleShortVersionString</key><string>` + xmlText(assets.Product.Version) + `</string>` +
+			`<key>CFBundleVersion</key><string>` + xmlText(assets.Product.Version) + `</string><key>NSHighResolutionCapable</key><true/>` +
+			`<key>NSAppleEventsUsageDescription</key><string>Manage projection windows.</string></dict></plist>`
+		if err := os.WriteFile(filepath.Join(appRoot, "Contents", "Info.plist"), []byte(plist), 0644); err != nil {
+			return err
 		}
 	}
 
@@ -167,8 +175,12 @@ func run() error {
 	if *goos == "windows" {
 		exeExt = ".exe"
 	}
-	copyFile(guiPath, filepath.Join(*output, assets.Product.Name+exeExt))
-	copyFile(cliPath, filepath.Join(*output, "virdeck-cli"+exeExt))
+	if err := copyFile(guiPath, filepath.Join(*output, assets.Product.Name+exeExt)); err != nil {
+		return err
+	}
+	if err := copyFile(cliPath, filepath.Join(*output, "virdeck-cli"+exeExt)); err != nil {
+		return err
+	}
 
 	// 注释掉打包成 zip 的部分，直接产出 VirDeck 和 virdeck-cli 可执行文件
 	/*

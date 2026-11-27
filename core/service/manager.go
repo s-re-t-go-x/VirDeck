@@ -4,11 +4,13 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -17,6 +19,7 @@ import (
 
 	"virdeck/config"
 	"virdeck/core/adb"
+	"virdeck/core/apk"
 	"virdeck/core/catalog"
 	"virdeck/core/downloader"
 	"virdeck/core/emu"
@@ -51,7 +54,6 @@ type emuBackend interface {
 	InspectEnv(ctx context.Context) emu.EnvInfo
 	ListSystemImages() []string
 	CreateAVD(ctx context.Context, name, systemImage string, memoryMB, cores int) error
-	CloneAVD(srcName, dstName string) error
 	DeleteAVD(ctx context.Context, name string) error
 	StartProcess(opts emu.LaunchOptions) (*emu.Process, error)
 	StartProjectionWithSettings(context.Context, string, int, string, emu.ProjectionSettings) (bool, error)
@@ -85,18 +87,121 @@ type Config struct {
 	MaxConcurrent int
 	MinPort       int
 	MaxPort       int
-	StopGrace     time.Duration
-	BootTimeout   time.Duration
-	SkipTCPCheck  bool // used in unit tests
+	StopGrace           time.Duration
+	BootTimeout         time.Duration
+	SkipTCPCheck        bool // used in unit tests
+	DetachedSOCKSBridge bool // detach local HTTP->SOCKS5 bridge subprocess for CLI lifetimes
 }
 
 type runningEntry struct {
 	id         string
 	port       int
 	proc       *emu.Process
+	bridge     *emu.SOCKSBridge
 	bootCancel context.CancelFunc
 	stopping   bool
 	exited     chan struct{}
+	launchedAt time.Time
+	gpuMode    string
+	gpuRetries int
+	launchOpts emu.LaunchOptions
+}
+
+type eventSubscriber struct {
+	mu     sync.Mutex
+	stateQ []Event
+	otherQ []Event
+	notify chan struct{}
+	out    chan Event
+	closed bool
+}
+
+func newEventSubscriber() *eventSubscriber {
+	s := &eventSubscriber{
+		notify: make(chan struct{}, 1),
+		out:    make(chan Event, 128),
+	}
+	go s.pump()
+	return s
+}
+
+func (s *eventSubscriber) enqueue(ev Event) {
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return
+	}
+	if ev.Type == EventStateChanged {
+		s.stateQ = append(s.stateQ, ev)
+	} else if len(s.otherQ) < 256 {
+		s.otherQ = append(s.otherQ, ev)
+	}
+	s.mu.Unlock()
+	select {
+	case s.notify <- struct{}{}:
+	default:
+	}
+}
+
+func (s *eventSubscriber) close() {
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return
+	}
+	s.closed = true
+	s.mu.Unlock()
+	select {
+	case s.notify <- struct{}{}:
+	default:
+	}
+}
+
+func (s *eventSubscriber) pump() {
+	defer close(s.out)
+	for {
+		s.mu.Lock()
+		if s.closed {
+			s.mu.Unlock()
+			return
+		}
+		var ev Event
+		has := false
+		if len(s.stateQ) > 0 {
+			ev = s.stateQ[0]
+			s.stateQ = s.stateQ[1:]
+			has = true
+		} else if len(s.otherQ) > 0 {
+			ev = s.otherQ[0]
+			s.otherQ = s.otherQ[1:]
+			has = true
+		}
+		s.mu.Unlock()
+
+		if !has {
+			<-s.notify
+			continue
+		}
+		select {
+		case s.out <- ev:
+		case <-s.notify:
+			// Check whether we woke up because subscriber closed.
+			s.mu.Lock()
+			closed := s.closed
+			if !closed {
+				// Put back at front of priority queue if state change, or drop nothing.
+				if ev.Type == EventStateChanged {
+					s.stateQ = append([]Event{ev}, s.stateQ...)
+				} else {
+					s.otherQ = append([]Event{ev}, s.otherQ...)
+				}
+			}
+			s.mu.Unlock()
+			if closed {
+				return
+			}
+		}
+	}
 }
 
 // Manager implements the Service interface.
@@ -104,6 +209,10 @@ type Manager struct {
 	groupMu        sync.Mutex
 	screenLayoutMu sync.Mutex
 	namesMu        sync.Mutex
+	syncOpMu       sync.Mutex
+	syncMu         sync.Mutex
+	syncSession    *inputSyncSession
+	syncHooks      *inputSyncHooks
 	maintenance    sync.RWMutex // excludes cleanup from installs and instance mutations
 	cfg            Config
 	settingsPath   string
@@ -114,13 +223,15 @@ type Manager struct {
 	emu            emuBackend
 	adb            adbBackend
 
-	mu        sync.Mutex
-	running   map[string]*runningEntry // instanceID -> runningEntry
-	usedPorts map[int]string           // port -> instanceID
+	mu          sync.Mutex
+	running     map[string]*runningEntry // instanceID -> runningEntry
+	starting    map[string]struct{}      // instanceID -> reserving start slot before running[id] is added
+	instanceOps map[string]string        // instanceID -> exclusive lifecycle/offline op name
+	usedPorts   map[int]string           // port -> instanceID
 
 	subMu  sync.RWMutex
 	nextID int
-	subs   map[int]chan Event
+	subs   map[int]*eventSubscriber
 }
 
 // NewManager creates and initializes a new core Service Manager rooted at VirDeckData.
@@ -153,12 +264,16 @@ func NewManager(cfg Config) (*Manager, error) {
 
 	if cfg.RegistryPath == "" {
 		cfg.RegistryPath = filepath.Join(cfg.DataDir, "config", "instances.json")
-		// Seamless one-time migration from legacy data/instances.json if present.
+		// Seamless one-time migration from legacy <exeDir>/data/instances.json if present and valid.
 		if _, err := os.Stat(cfg.RegistryPath); errors.Is(err, os.ErrNotExist) {
-			legacyPath := filepath.Join("data", "instances.json")
-			if data, lerr := os.ReadFile(legacyPath); lerr == nil && len(strings.TrimSpace(string(data))) > 0 {
-				_ = os.MkdirAll(filepath.Dir(cfg.RegistryPath), 0o755)
-				_ = os.WriteFile(cfg.RegistryPath, data, 0o644)
+			if exePath, eerr := os.Executable(); eerr == nil {
+				legacyPath := filepath.Join(filepath.Dir(exePath), "data", "instances.json")
+				if data, lerr := os.ReadFile(legacyPath); lerr == nil && len(strings.TrimSpace(string(data))) > 0 {
+					var parsed []instance.Record
+					if json.Unmarshal(data, &parsed) == nil {
+						_ = writeFileAtomic(cfg.RegistryPath, data, 0o700, 0o600)
+					}
+				}
 			}
 		}
 	}
@@ -206,9 +321,11 @@ func NewManager(cfg Config) (*Manager, error) {
 		dl:           dlClient,
 		emu:          emuCtrl,
 		adb:          adbClient,
-		running:      make(map[string]*runningEntry),
-		usedPorts:    make(map[int]string),
-		subs:         make(map[int]chan Event),
+		running:     make(map[string]*runningEntry),
+		starting:    make(map[string]struct{}),
+		instanceOps: make(map[string]string),
+		usedPorts:   make(map[int]string),
+		subs:         make(map[int]*eventSubscriber),
 	}
 	emuCtrl.SetProjectionLogger(mgr.emitLog)
 	if adbBin != "" {
@@ -249,22 +366,39 @@ func (m *Manager) CheckEnv(ctx context.Context) (EnvStatus, error) {
 		m.cat.SetSDKRoot(info.SDKRoot)
 	}
 	status := EnvStatus{
-		DataDir:        info.DataDir,
-		SDKRoot:        info.SDKRoot,
-		AVDHome:        info.AVDHome,
-		EmulatorPath:   info.EmulatorPath,
-		ADBPath:        info.ADBPath,
-		AVDManagerPath: info.AVDManagerPath,
-		SDKManagerPath: info.SDKManagerPath,
-		ScrcpyPath:     info.ScrcpyPath,
-		AccelOK:        info.AccelOK,
-		AccelMessage:   info.AccelMessage,
-		PathASCIIOK:    info.PathASCIIOK,
-		PathWritableOK: info.PathWritableOK,
-		PathWarning:    info.PathWarning,
-		SystemImages:   info.SystemImages,
+		DataDir:          info.DataDir,
+		EffectiveDataDir: info.EffectiveDataDir,
+		PathCompatMode:   info.PathCompatMode,
+		SDKRoot:          info.SDKRoot,
+		AVDHome:          info.AVDHome,
+		EmulatorPath:     info.EmulatorPath,
+		ADBPath:          info.ADBPath,
+		AVDManagerPath:   info.AVDManagerPath,
+		SDKManagerPath:   info.SDKManagerPath,
+		ScrcpyPath:       info.ScrcpyPath,
+		AccelOK:          info.AccelOK,
+		AccelMessage:     info.AccelMessage,
+		PathASCIIOK:      info.PathASCIIOK,
+		PathWritableOK:   info.PathWritableOK,
+		PathWarning:      info.PathWarning,
+		SystemImages:     info.SystemImages,
 	}
 	return status, nil
+}
+
+// SuggestPureASCIIDataDir returns a recommended writable pure-ASCII data directory on Windows.
+func (m *Manager) SuggestPureASCIIDataDir() string {
+	return emu.SuggestPureASCIIDataDir()
+}
+
+// SetDataDirOverride validates newDir and writes the startup pointer file so the next launch uses it.
+func (m *Manager) SetDataDirOverride(_ context.Context, newDir string) (string, error) {
+	ptrPath, err := emu.SaveDataDirOverride(newDir)
+	if err != nil {
+		return "", err
+	}
+	m.emitLog("", fmt.Sprintf("已配置下次启动改用纯英文数据目录: %s（配置记录: %s）", newDir, ptrPath))
+	return ptrPath, nil
 }
 
 // ListSystemImages returns installed Android system image package strings.
@@ -302,6 +436,29 @@ func (m *Manager) Create(ctx context.Context, spec CreateSpec) ([]Instance, erro
 	if spec.Cores <= 0 {
 		spec.Cores = DefaultCores
 	}
+	storageGB := spec.StorageGB
+	if storageGB == 0 {
+		storageGB = 6
+	}
+	if storageGB < 4 || storageGB > 128 {
+		return nil, errors.New("实例存储容量需在 4–128 GB 之间")
+	}
+	resSpec := strings.TrimSpace(spec.Resolution)
+	if resSpec != "" {
+		if _, err := emu.ParseResolution(resSpec); err != nil {
+			return nil, err
+		}
+	} else {
+		resSpec = config.Values.Create.Resolution
+	}
+	gpuMode, err := normalizeAndValidateGPUMode(spec.GPUMode)
+	if err != nil {
+		return nil, err
+	}
+	note, err := normalizeAndValidateNote(spec.Note)
+	if err != nil {
+		return nil, err
+	}
 
 	created := make([]Instance, 0, spec.Count)
 	for i := 1; i <= spec.Count; i++ {
@@ -314,8 +471,18 @@ func (m *Manager) Create(ctx context.Context, spec CreateSpec) ([]Instance, erro
 		m.emitLog("", fmt.Sprintf("正在创建实例 %s (镜像: %s)...", name, spec.SystemImage))
 
 		var err error
-		if ctrl, ok := m.emu.(*emu.Controller); ok && strings.TrimSpace(spec.Resolution) != "" {
-			err = ctrl.CreateAVDWithSpec(ctx, avdName, spec.SystemImage, spec.MemoryMB, spec.Cores, spec.Resolution)
+		if optsCreator, ok := m.emu.(interface {
+			CreateAVDWithOptions(context.Context, string, string, emu.CreateAVDOptions) error
+		}); ok {
+			err = optsCreator.CreateAVDWithOptions(ctx, avdName, spec.SystemImage, emu.CreateAVDOptions{
+				MemoryMB:   spec.MemoryMB,
+				Cores:      spec.Cores,
+				Resolution: resSpec,
+				StorageGB:  storageGB,
+				QuickBoot:  spec.QuickBoot,
+			})
+		} else if ctrl, ok := m.emu.(*emu.Controller); ok && resSpec != "" {
+			err = ctrl.CreateAVDWithSpec(ctx, avdName, spec.SystemImage, spec.MemoryMB, spec.Cores, resSpec)
 		} else {
 			err = m.emu.CreateAVD(ctx, avdName, spec.SystemImage, spec.MemoryMB, spec.Cores)
 		}
@@ -330,6 +497,11 @@ func (m *Manager) Create(ctx context.Context, spec CreateSpec) ([]Instance, erro
 			SystemImage: spec.SystemImage,
 			MemoryMB:    spec.MemoryMB,
 			Cores:       spec.Cores,
+			Resolution:  resSpec,
+			StorageGB:   storageGB,
+			QuickBoot:   spec.QuickBoot,
+			GPUMode:     gpuMode,
+			Note:        note,
 			Port:        0,
 			Proxy:       strings.TrimSpace(spec.Proxy),
 			Headless:    spec.Headless,
@@ -345,64 +517,14 @@ func (m *Manager) Create(ctx context.Context, spec CreateSpec) ([]Instance, erro
 	return created, nil
 }
 
-// Clone clones a stopped instance into count new instances (optional workflow).
-func (m *Manager) Clone(ctx context.Context, srcID string, count int) ([]Instance, error) {
-	m.namesMu.Lock()
-	defer m.namesMu.Unlock()
-	m.maintenance.RLock()
-	defer m.maintenance.RUnlock()
-	src, ok := m.registry.Get(srcID)
-	if !ok {
-		return nil, fmt.Errorf("未找到源实例: %s", srcID)
-	}
-	if (src.State != Stopped && src.State != Failed) || src.Port > 0 {
-		return nil, fmt.Errorf("克隆前请先停止源实例 %s", src.Name)
-	}
-	if count <= 0 {
-		count = config.Values.CloneCount
-	}
-
-	cloned := make([]Instance, 0, count)
-	for i := 1; i <= count; i++ {
-		select {
-		case <-ctx.Done():
-			return cloned, ctx.Err()
-		default:
-		}
-		dstName := m.nextAvailableName(src.Name+"_clone", i)
-		m.emitLog(src.ID, fmt.Sprintf("正在从 %s 克隆实例 %s...", src.Name, dstName))
-		id := newShortID()
-		avdName := "avd_" + id
-		if err := m.emu.CloneAVD(src.InternalName(), avdName); err != nil {
-			m.emitLog(src.ID, fmt.Sprintf("克隆 %s 失败: %v", dstName, err))
-			return cloned, err
-		}
-		inst := Instance{
-			ID:          id,
-			AVDName:     avdName,
-			Name:        dstName,
-			SystemImage: src.SystemImage,
-			MemoryMB:    src.MemoryMB,
-			Cores:       src.Cores,
-			Port:        0,
-			Proxy:       src.Proxy,
-			Headless:    src.Headless,
-			State:       Stopped,
-			CreatedAt:   time.Now().Format(time.RFC3339),
-		}
-		if err := m.registry.Add(inst); err != nil {
-			return cloned, err
-		}
-		cloned = append(cloned, inst)
-		m.emitStateChanged(inst, fmt.Sprintf("已克隆生成实例 %s", inst.Name))
-	}
-	return cloned, nil
-}
-
 // Start launches one or more instances, dynamically allocating even console ports and enforcing concurrency limits.
 func (m *Manager) Start(ctx context.Context, ids ...string) error {
 	var errs []error
 	for _, id := range ids {
+		if err := ctx.Err(); err != nil {
+			errs = append(errs, err)
+			break
+		}
 		if err := m.startOne(ctx, id); err != nil {
 			errs = append(errs, err)
 		}
@@ -410,7 +532,90 @@ func (m *Manager) Start(ctx context.Context, ids ...string) error {
 	return errors.Join(errs...)
 }
 
+func (m *Manager) ensureLifecycleMapsLocked() {
+	if m.running == nil {
+		m.running = make(map[string]*runningEntry)
+	}
+	if m.starting == nil {
+		m.starting = make(map[string]struct{})
+	}
+	if m.instanceOps == nil {
+		m.instanceOps = make(map[string]string)
+	}
+	if m.usedPorts == nil {
+		m.usedPorts = make(map[int]string)
+	}
+}
+
+func (m *Manager) canSafelyCleanLocks(ctx context.Context, avdName string) bool {
+	if strict, ok := m.adb.(interface {
+		DiscoverEmulatorsStrict(context.Context) (map[string]int, int, error)
+	}); ok {
+		active, unknown, err := strict.DiscoverEmulatorsStrict(ctx)
+		return err == nil && unknown == 0 && active[avdName] == 0
+	}
+	has, err := m.adb.HasEmulators(ctx)
+	if err != nil || has {
+		return false
+	}
+	active := m.adb.DiscoverEmulators(ctx)
+	return active[avdName] == 0
+}
+
+func (m *Manager) acquireOfflineOp(ctx context.Context, id, op string) (Instance, func(), error) {
+	m.mu.Lock()
+	m.ensureLifecycleMapsLocked()
+	if cur := m.instanceOps[id]; cur != "" {
+		m.mu.Unlock()
+		return Instance{}, func() {}, fmt.Errorf("实例当前正在执行「%s」，请稍后再试", cur)
+	}
+	if _, active := m.running[id]; active {
+		m.mu.Unlock()
+		return Instance{}, func() {}, errors.New("请先停止该实例再执行此操作")
+	}
+	if _, busy := m.starting[id]; busy {
+		m.mu.Unlock()
+		return Instance{}, func() {}, errors.New("实例正在启动中，请稍后再执行此操作")
+	}
+	inst, ok := m.registry.Get(id)
+	if !ok {
+		m.mu.Unlock()
+		return Instance{}, func() {}, fmt.Errorf("实例不存在: %s", id)
+	}
+	if inst.State == Running || inst.State == Starting || inst.Port > 0 {
+		m.mu.Unlock()
+		return Instance{}, func() {}, errors.New("请先停止该实例再执行此操作")
+	}
+	m.instanceOps[id] = op
+	m.mu.Unlock()
+
+	var once sync.Once
+	release := func() {
+		once.Do(func() {
+			m.mu.Lock()
+			if m.instanceOps != nil && m.instanceOps[id] == op {
+				delete(m.instanceOps, id)
+			}
+			m.mu.Unlock()
+		})
+	}
+
+	if strict, ok := m.adb.(interface {
+		DiscoverEmulatorsStrict(context.Context) (map[string]int, int, error)
+	}); ok {
+		active, _, err := strict.DiscoverEmulatorsStrict(ctx)
+		if err == nil && active[inst.InternalName()] > 0 {
+			release()
+			return Instance{}, func() {}, errors.New("检测到该实例仍在后台运行，请先停止")
+		}
+	}
+	return inst, release, nil
+}
+
 func (m *Manager) startOne(ctx context.Context, id string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	m.maintenance.RLock()
 	defer m.maintenance.RUnlock()
 	inst, ok := m.registry.Get(id)
@@ -419,6 +624,7 @@ func (m *Manager) startOne(ctx context.Context, id string) error {
 	}
 
 	m.mu.Lock()
+	m.ensureLifecycleMapsLocked()
 	if _, exists := m.running[id]; exists {
 		m.mu.Unlock()
 		if inst.State == Failed {
@@ -426,7 +632,15 @@ func (m *Manager) startOne(ctx context.Context, id string) error {
 		}
 		return nil // already running or starting
 	}
-	if len(m.running) >= m.cfg.MaxConcurrent {
+	if _, starting := m.starting[id]; starting {
+		m.mu.Unlock()
+		return nil
+	}
+	if curOp := m.instanceOps[id]; curOp != "" {
+		m.mu.Unlock()
+		return fmt.Errorf("实例 %s 正在执行「%s」，请稍后再启动", inst.Name, curOp)
+	}
+	if len(m.running)+len(m.starting) >= m.cfg.MaxConcurrent {
 		m.mu.Unlock()
 		return fmt.Errorf("已达到最大同时运行实例数上限 (%d)，无法启动 %s", m.cfg.MaxConcurrent, inst.Name)
 	}
@@ -436,21 +650,86 @@ func (m *Manager) startOne(ctx context.Context, id string) error {
 		return fmt.Errorf("为 %s 分配端口失败: %w", inst.Name, err)
 	}
 	m.usedPorts[port] = id
+	m.starting[id] = struct{}{}
+	m.instanceOps[id] = "启动"
 	m.mu.Unlock()
 
-	proc, err := m.emu.StartProcess(emu.LaunchOptions{
-		AVDName:    inst.InternalName(),
-		Port:       port,
-		MemoryMB:   inst.MemoryMB,
-		Cores:      inst.Cores,
-		Proxy:      inst.Proxy,
-		Headless:   inst.Headless,
-		NoSnapshot: true,
-	})
-	if err != nil {
+	committed := false
+	var bridge *emu.SOCKSBridge
+	defer func() {
+		if committed {
+			return
+		}
+		if bridge != nil {
+			_ = bridge.Close()
+		}
 		m.mu.Lock()
-		delete(m.usedPorts, port)
+		delete(m.starting, id)
+		if m.instanceOps[id] == "启动" {
+			delete(m.instanceOps, id)
+		}
+		if m.usedPorts[port] == id {
+			delete(m.usedPorts, port)
+		}
 		m.mu.Unlock()
+	}()
+
+	// Safe lock cleanup: only remove *.lock files after confirming via ADB that discovery succeeded
+	// with zero unknown devices and this AVD is not active.
+	if cleaner, ok := m.emu.(interface {
+		CleanStaleLocks(string) ([]string, error)
+	}); ok {
+		if m.canSafelyCleanLocks(ctx, inst.InternalName()) {
+			if removed, lerr := cleaner.CleanStaleLocks(inst.InternalName()); lerr == nil && len(removed) > 0 {
+				m.emitLog(id, fmt.Sprintf("已安全清理 %s 残留锁文件: %s", inst.Name, strings.Join(removed, ", ")))
+			}
+		}
+	}
+
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	launchProxy := inst.Proxy
+	if emu.IsSOCKS5Proxy(inst.Proxy) {
+		var berr error
+		if m.cfg.DetachedSOCKSBridge {
+			bridge, berr = emu.StartDetachedSOCKSBridge("", nil, inst.Proxy, port)
+		} else {
+			bridge, berr = emu.StartSOCKSBridge(inst.Proxy)
+		}
+		if berr != nil {
+			updated, _ := m.registry.Update(id, func(r *Instance) error {
+				r.State = Failed
+				r.Port = 0
+				r.AppliedProxy = ""
+				r.LastError = berr.Error()
+				return nil
+			})
+			m.emitStateChanged(updated, fmt.Sprintf("启动 %s 失败: %v", inst.Name, berr))
+			return berr
+		}
+		launchProxy = bridge.HTTPProxyURL()
+	}
+
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	launchOpts := emu.LaunchOptions{
+		AVDName:        inst.InternalName(),
+		Port:           port,
+		MemoryMB:       inst.MemoryMB,
+		Cores:          inst.Cores,
+		Proxy:          launchProxy,
+		GPUMode:        inst.GPUMode,
+		Headless:       inst.Headless,
+		NoSnapshot:     !inst.QuickBoot,
+		NoSnapshotLoad: inst.QuickBoot && inst.ForceColdNext,
+	}
+
+	proc, err := m.emu.StartProcess(launchOpts)
+	if err != nil {
 		updated, _ := m.registry.Update(id, func(r *Instance) error {
 			r.State = Failed
 			r.Port = 0
@@ -467,12 +746,21 @@ func (m *Manager) startOne(ctx context.Context, id string) error {
 		id:         id,
 		port:       port,
 		proc:       proc,
+		bridge:     bridge,
 		bootCancel: bootCancel,
 		exited:     make(chan struct{}),
+		launchedAt: time.Now(),
+		gpuMode:    inst.GPUMode,
+		launchOpts: launchOpts,
 	}
 
 	m.mu.Lock()
+	delete(m.starting, id)
+	if m.instanceOps[id] == "启动" {
+		delete(m.instanceOps, id)
+	}
 	m.running[id] = entry
+	committed = true
 	m.mu.Unlock()
 
 	updated, err := m.registry.Update(id, func(r *Instance) error {
@@ -483,6 +771,14 @@ func (m *Manager) startOne(ctx context.Context, id string) error {
 		return nil
 	})
 	if err != nil {
+		m.mu.Lock()
+		delete(m.running, id)
+		delete(m.usedPorts, port)
+		m.mu.Unlock()
+		_ = proc.ForceKillTree()
+		if bridge != nil {
+			_ = bridge.Close()
+		}
 		return err
 	}
 	m.emitStateChanged(updated, fmt.Sprintf("实例 %s 正在启动 (端口 %d, PID %d)...", updated.Name, port, proc.PID()))
@@ -493,51 +789,122 @@ func (m *Manager) startOne(ctx context.Context, id string) error {
 
 func (m *Manager) watchInstance(entry *runningEntry, bootCtx context.Context) {
 	defer close(entry.exited)
-	defer entry.bootCancel()
-
-	bootCh := make(chan error, 1)
-	go func() {
-		bootCh <- m.adb.WaitForBoot(bootCtx, entry.port, 1500*time.Millisecond)
+	defer func() {
+		if entry.bridge != nil {
+			_ = entry.bridge.Close()
+		}
 	}()
 
 	var procErr error
 	var bootFailure string
-	select {
-	case err := <-bootCh:
-		if err == nil {
-			if updated, uerr := m.registry.Update(entry.id, func(r *Instance) error {
-				if r.State == Starting {
-					r.State = Running
-				}
-				return nil
-			}); uerr == nil {
-				m.emitStateChanged(updated, fmt.Sprintf("实例 %s 启动完成 (emulator-%d)", updated.Name, entry.port))
-			}
-		}
-		if err != nil {
+
+	for {
+		bootCh := make(chan error, 1)
+		curBootCtx := bootCtx
+		go func() {
+			bootCh <- m.adb.WaitForBoot(curBootCtx, entry.port, 1500*time.Millisecond)
+		}()
+
+		retryGPU := false
+		select {
+		case err := <-bootCh:
 			m.mu.Lock()
+			entry.bootCancel()
+			m.mu.Unlock()
+			if err == nil {
+				if updated, uerr := m.registry.Update(entry.id, func(r *Instance) error {
+					if r.State == Starting {
+						r.State = Running
+					}
+					r.ForceColdNext = false
+					if entry.gpuRetries > 0 && entry.gpuMode != "" {
+						r.GPUMode = entry.gpuMode
+					}
+					return nil
+				}); uerr == nil {
+					m.emitStateChanged(updated, fmt.Sprintf("实例 %s 启动完成 (emulator-%d)", updated.Name, entry.port))
+					if len(updated.ABIList) == 0 {
+						go m.probeInstanceABIList(entry.id, entry.port)
+					}
+				}
+			} else {
+				m.mu.Lock()
+				stopping := entry.stopping
+				m.mu.Unlock()
+				if !stopping {
+					bootFailure = fmt.Sprintf("启动检测失败: %v", err)
+					if errors.Is(err, context.DeadlineExceeded) {
+						bootFailure = fmt.Sprintf("启动超时（%s）: %v", m.cfg.BootTimeout, err)
+					}
+					if updated, uerr := m.registry.Update(entry.id, func(r *Instance) error {
+						r.State = Failed
+						r.LastError = bootFailure
+						if r.QuickBoot {
+							r.ForceColdNext = true
+						}
+						return nil
+					}); uerr == nil {
+						m.emitStateChanged(updated, fmt.Sprintf("实例 %s %s，正在清理未就绪进程", updated.Name, bootFailure))
+					}
+					if killErr := entry.proc.ForceKillTree(); killErr != nil {
+						bootFailure += fmt.Sprintf("；清理启动进程失败: %v，请手动停止", killErr)
+						if updated, uerr := m.registry.Update(entry.id, func(r *Instance) error { r.LastError = bootFailure; return nil }); uerr == nil {
+							m.emitStateChanged(updated, bootFailure)
+						}
+					}
+				}
+			}
+
+			procErr = <-entry.proc.Done()
+
+		case procErr = <-entry.proc.Done():
+			m.mu.Lock()
+			entry.bootCancel()
 			stopping := entry.stopping
 			m.mu.Unlock()
-			if !stopping {
-				bootFailure = fmt.Sprintf("启动检测失败: %v", err)
-				if errors.Is(err, context.DeadlineExceeded) {
-					bootFailure = fmt.Sprintf("启动超时（%s）: %v", m.cfg.BootTimeout, err)
-				}
-				if updated, uerr := m.registry.Update(entry.id, func(r *Instance) error { r.State = Failed; r.LastError = bootFailure; return nil }); uerr == nil {
-					m.emitStateChanged(updated, fmt.Sprintf("实例 %s %s，正在清理未就绪进程", updated.Name, bootFailure))
-				}
-				if killErr := entry.proc.ForceKillTree(); killErr != nil {
-					bootFailure += fmt.Sprintf("；清理启动进程失败: %v，请手动停止", killErr)
-					if updated, uerr := m.registry.Update(entry.id, func(r *Instance) error { r.LastError = bootFailure; return nil }); uerr == nil {
-						m.emitStateChanged(updated, bootFailure)
+
+			if !stopping && time.Since(entry.launchedAt) < 10*time.Second && entry.gpuRetries == 0 {
+				out := entry.proc.Output()
+				if emu.IsGPUStartupFailure(out) {
+					if nextGPU := emu.FallbackGPUMode(runtime.GOOS, runtime.GOARCH, entry.gpuMode); nextGPU != "" {
+						retryOpts := entry.launchOpts
+						retryOpts.GPUMode = nextGPU
+						if !retryOpts.NoSnapshot {
+							retryOpts.NoSnapshotLoad = true
+						}
+						m.emitLog(entry.id, fmt.Sprintf("检测到显卡初始化早退，自动切换为 -gpu %s 重试启动...", nextGPU))
+						if newProc, rerr := m.emu.StartProcess(retryOpts); rerr == nil {
+							nextBootCtx, nextBootCancel := context.WithTimeout(context.Background(), m.cfg.BootTimeout)
+							defer nextBootCancel()
+							m.mu.Lock()
+							stillStopping := entry.stopping
+							if !stillStopping {
+								entry.proc = newProc
+								entry.launchedAt = time.Now()
+								entry.gpuMode = nextGPU
+								entry.gpuRetries++
+								entry.launchOpts = retryOpts
+								entry.bootCancel = nextBootCancel
+							}
+							m.mu.Unlock()
+							if stillStopping {
+								nextBootCancel()
+								_ = newProc.ForceKillTree()
+								procErr = <-newProc.Done()
+							} else {
+								bootCtx = nextBootCtx
+								retryGPU = true
+							}
+						} else {
+							m.emitLog(entry.id, fmt.Sprintf("GPU 回退重拉失败: %v", rerr))
+						}
 					}
 				}
 			}
 		}
-
-		procErr = <-entry.proc.Done()
-	case procErr = <-entry.proc.Done():
-		entry.bootCancel()
+		if !retryGPU {
+			break
+		}
 	}
 
 	m.mu.Lock()
@@ -557,18 +924,18 @@ func (m *Manager) watchInstance(entry *runningEntry, bootCtx context.Context) {
 
 	if bootFailure != "" {
 		finalState = Failed
-		lastErr = bootFailure
+		lastErr = config.RedactText(bootFailure)
 		if out := entry.proc.Output(); out != "" {
-			lastErr += "；模拟器输出：" + firstLastLines(out, 320)
+			lastErr += "；模拟器输出：" + config.RedactText(firstLastLines(out, 320))
 		}
 		msg = fmt.Sprintf("实例 %s 启动失败: %s", prev.Name, lastErr)
 	} else if !wasStopping && prev.State == Starting {
 		finalState = Failed
 		out := entry.proc.Output()
 		if out != "" {
-			lastErr = firstLastLines(out, 320)
+			lastErr = config.RedactText(firstLastLines(out, 320))
 		} else if procErr != nil {
-			lastErr = procErr.Error()
+			lastErr = config.RedactError(procErr)
 		} else {
 			lastErr = "模拟器进程在完成引导前意外退出"
 		}
@@ -580,9 +947,31 @@ func (m *Manager) watchInstance(entry *runningEntry, bootCtx context.Context) {
 		r.Port = 0
 		r.AppliedProxy = ""
 		r.LastError = lastErr
+		if finalState == Failed && r.QuickBoot {
+			r.ForceColdNext = true
+		}
 		return nil
 	}); err == nil {
 		m.emitStateChanged(updated, msg)
+	}
+}
+
+func (m *Manager) probeInstanceABIList(id string, port int) {
+	prober, ok := m.adb.(interface {
+		GetABIList(context.Context, int) ([]string, error)
+	})
+	if !ok {
+		return
+	}
+	abis, err := prober.GetABIList(context.Background(), port)
+	if err != nil || len(abis) == 0 {
+		return
+	}
+	if updated, uerr := m.registry.Update(id, func(r *Instance) error {
+		r.ABIList = abis
+		return nil
+	}); uerr == nil {
+		m.emitLog(id, fmt.Sprintf("已探测实例 %s 支持 ABI: %s", updated.Name, strings.Join(abis, ", ")))
 	}
 }
 
@@ -609,6 +998,10 @@ func (m *Manager) Stop(ctx context.Context, ids ...string) error {
 }
 
 func (m *Manager) stopOne(ctx context.Context, id string) error {
+	if m.GetSettings().ScreenLayout.RememberPosition {
+		m.captureLastWindowPositions([]string{id})
+	}
+	m.handleInstanceStoppedForSync(id)
 	m.mu.Lock()
 	entry, ok := m.running[id]
 	if !ok {
@@ -648,6 +1041,12 @@ func (m *Manager) stopOne(ctx context.Context, id string) error {
 		return nil
 	case <-graceTimer.C:
 		m.emitLog(id, fmt.Sprintf("实例 %s 优雅停机超时，正在强制终止进程树...", inst.Name))
+		if inst.QuickBoot {
+			_, _ = m.registry.Update(id, func(r *Instance) error {
+				r.ForceColdNext = true
+				return nil
+			})
+		}
 		killErr = entry.proc.ForceKillTree()
 		if killErr != nil {
 			m.emitLog(id, fmt.Sprintf("强制终止实例 %s 失败: %v", inst.Name, killErr))
@@ -678,17 +1077,42 @@ func (m *Manager) Delete(ctx context.Context, ids ...string) error {
 		if !ok {
 			continue
 		}
-		if err := m.stopOne(ctx, id); err != nil {
-			errs = append(errs, err)
+		m.mu.Lock()
+		if _, starting := m.starting[id]; starting {
+			m.mu.Unlock()
+			errs = append(errs, fmt.Errorf("实例 %s 正在启动中，请稍后再删除", inst.Name))
 			continue
 		}
-		m.emitLog(id, fmt.Sprintf("正在删除实例 %s...", inst.Name))
-		if err := m.emu.DeleteAVD(ctx, inst.InternalName()); err != nil {
-			errs = append(errs, err)
+		if busyOp := m.instanceOps[id]; busyOp != "" {
+			m.mu.Unlock()
+			errs = append(errs, fmt.Errorf("实例 %s 正在执行%s，请完成后再删除", inst.Name, busyOp))
 			continue
 		}
-		if _, err := m.registry.Delete(id); err != nil {
-			errs = append(errs, err)
+		m.instanceOps[id] = "删除"
+		m.mu.Unlock()
+
+		deleteErr := func() error {
+			defer func() {
+				m.mu.Lock()
+				if m.instanceOps[id] == "删除" {
+					delete(m.instanceOps, id)
+				}
+				m.mu.Unlock()
+			}()
+			if err := m.stopOne(ctx, id); err != nil {
+				return err
+			}
+			m.emitLog(id, fmt.Sprintf("正在删除实例 %s...", inst.Name))
+			if err := m.emu.DeleteAVD(ctx, inst.InternalName()); err != nil {
+				return err
+			}
+			if _, err := m.registry.Delete(id); err != nil {
+				return err
+			}
+			return nil
+		}()
+		if deleteErr != nil {
+			errs = append(errs, deleteErr)
 			continue
 		}
 		m.emit(Event{
@@ -701,17 +1125,21 @@ func (m *Manager) Delete(ctx context.Context, ids ...string) error {
 	return errors.Join(errs...)
 }
 
-// SetProxy sets the HTTP proxy address for an instance (applied via -http-proxy on startup).
+// SetProxy sets the HTTP/SOCKS5 proxy address for an instance (applied on startup).
 func (m *Manager) SetProxy(ctx context.Context, id, proxy string) error {
 	proxy = strings.TrimSpace(proxy)
 	updated, err := m.registry.Update(id, func(r *Instance) error {
+		if r.QuickBoot && strings.TrimSpace(r.Proxy) != proxy {
+			r.ForceColdNext = true
+		}
 		r.Proxy = proxy
 		return nil
 	})
 	if err != nil {
 		return err
 	}
-	msg := fmt.Sprintf("实例 %s 代理已更新为 %q", updated.Name, proxy)
+	redacted := config.RedactProxyURL(proxy)
+	msg := fmt.Sprintf("实例 %s 代理已更新为 %q", updated.Name, redacted)
 	if proxy == "" {
 		msg = fmt.Sprintf("实例 %s 已清除代理", updated.Name)
 	}
@@ -725,6 +1153,9 @@ func (m *Manager) SetProxy(ctx context.Context, id, proxy string) error {
 // SetHeadless configures whether an instance starts with -no-window.
 func (m *Manager) SetHeadless(ctx context.Context, id string, headless bool) error {
 	updated, err := m.registry.Update(id, func(r *Instance) error {
+		if r.QuickBoot && r.Headless != headless {
+			r.ForceColdNext = true
+		}
 		r.Headless = headless
 		return nil
 	})
@@ -739,7 +1170,7 @@ func (m *Manager) SetHeadless(ctx context.Context, id string, headless bool) err
 	return nil
 }
 
-// InstallAPK installs an APK file across all specified running instances concurrently.
+// InstallAPK installs an APK or split-APK bundle (.apks / .xapk) across all specified running instances concurrently.
 func (m *Manager) InstallAPK(ctx context.Context, ids []string, apkPath string) error {
 	apkPath = strings.TrimSpace(apkPath)
 	if apkPath == "" {
@@ -748,6 +1179,45 @@ func (m *Manager) InstallAPK(ctx context.Context, ids []string, apkPath string) 
 	targets, err := m.resolveRunningPorts(ids)
 	if err != nil {
 		return err
+	}
+	if apk.IsSplitBundlePath(apkPath) {
+		extractedAPKs, cleanup, err := apk.ExtractSplitAPKs(apkPath)
+		if err != nil {
+			return err
+		}
+		defer cleanup()
+		m.emitLog("", fmt.Sprintf("开始向 %d 个运行中实例批量安装分包: %s", len(targets), filepath.Base(apkPath)))
+		var (
+			mu   sync.Mutex
+			errs []error
+			wg   sync.WaitGroup
+		)
+		for id, port := range targets {
+			wg.Add(1)
+			go func(instID string, p int) {
+				defer wg.Done()
+				var abis []string
+				var imgABI string
+				compat := catalog.ARMCompatNone
+				if inst, ok := m.registry.Get(instID); ok {
+					abis = inst.ABIList
+					imgABI, compat = imageCompatFromSystemImage(inst.SystemImage)
+				}
+				selected := apk.SelectSplitAPKsForABIs(extractedAPKs, abis, imgABI, compat)
+				if err := m.installMultipleWithOptions(ctx, instID, p, selected, adb.InstallOptions{}); err != nil {
+					mu.Lock()
+					errs = append(errs, fmt.Errorf("[%s] %s", instID, adb.TranslateInstallError(err)))
+					mu.Unlock()
+				}
+			}(id, port)
+		}
+		wg.Wait()
+		if err := errors.Join(errs...); err != nil {
+			m.emitLog("", fmt.Sprintf("批量安装分包部分失败: %v", err))
+			return err
+		}
+		m.emitLog("", fmt.Sprintf("批量安装分包完成 (%s)", filepath.Base(apkPath)))
+		return nil
 	}
 	m.emitLog("", fmt.Sprintf("开始向 %d 个运行中实例批量安装 APK: %s", len(targets), filepath.Base(apkPath)))
 	if err := m.adb.BatchInstallAPK(ctx, targets, apkPath); err != nil {
@@ -818,8 +1288,91 @@ func (m *Manager) openScreen(ctx context.Context, id string, bounds *screenlayou
 	}
 	m.emitLog(id, fmt.Sprintf("已拉起 %s 的 scrcpy 投屏窗口", inst.Name))
 	if created && bounds == nil {
+		if m.tryRestoreLastScreenPosition(ctx, id) {
+			return nil
+		}
 		return m.fillNewScreen(ctx, id)
 	}
+	return nil
+}
+
+// WaitInstanceReady waits reliably for an instance to reach Running using both event subscription and polling fallback.
+func (m *Manager) WaitInstanceReady(ctx context.Context, id string) (Instance, error) {
+	evCh, cancel := m.Subscribe()
+	defer cancel()
+
+	check := func() (Instance, bool, error) {
+		inst, ok := m.registry.Get(id)
+		if !ok {
+			return Instance{}, false, fmt.Errorf("实例不存在: %s", id)
+		}
+		switch inst.State {
+		case Running:
+			return inst, true, nil
+		case Failed:
+			if inst.LastError != "" {
+				return inst, false, fmt.Errorf("实例 %s 启动失败: %s", inst.Name, inst.LastError)
+			}
+			return inst, false, fmt.Errorf("实例 %s 启动失败", inst.Name)
+		case Stopped:
+			return inst, false, fmt.Errorf("实例 %s 已停止", inst.Name)
+		default:
+			return inst, false, nil
+		}
+	}
+
+	if inst, ready, err := check(); ready || err != nil {
+		return inst, err
+	}
+
+	ticker := time.NewTicker(1500 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return Instance{}, ctx.Err()
+		case ev, ok := <-evCh:
+			if !ok {
+				if inst, ready, err := check(); ready || err != nil {
+					return inst, err
+				}
+				return Instance{}, errors.New("事件通道已关闭")
+			}
+			if ev.Type == EventStateChanged && ev.InstanceID == id {
+				if inst, ready, err := check(); ready || err != nil {
+					return inst, err
+				}
+			}
+		case <-ticker.C:
+			if inst, ready, err := check(); ready || err != nil {
+				return inst, err
+			}
+		}
+	}
+}
+
+// ClearInstanceSnapshot clears saved quick-boot snapshots and forces a clean cold boot on next start.
+func (m *Manager) ClearInstanceSnapshot(ctx context.Context, id string) error {
+	m.maintenance.RLock()
+	defer m.maintenance.RUnlock()
+	inst, release, err := m.acquireOfflineOp(ctx, id, "清除快照")
+	if err != nil {
+		return err
+	}
+	defer release()
+	if clearer, ok := m.emu.(interface{ ClearSnapshots(string) error }); ok {
+		if err := clearer.ClearSnapshots(inst.InternalName()); err != nil {
+			return err
+		}
+	}
+	updated, err := m.registry.Update(id, func(r *Instance) error {
+		r.ForceColdNext = true
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	m.emitStateChanged(updated, fmt.Sprintf("已清除实例 %s 的快速启动快照（下次启动将执行冷启动）", updated.Name))
 	return nil
 }
 
@@ -829,17 +1382,20 @@ func (m *Manager) Subscribe() (<-chan Event, func()) {
 	defer m.subMu.Unlock()
 	id := m.nextID
 	m.nextID++
-	ch := make(chan Event, 128)
-	m.subs[id] = ch
+	sub := newEventSubscriber()
+	m.subs[id] = sub
 	cancel := func() {
 		m.subMu.Lock()
-		defer m.subMu.Unlock()
-		if c, ok := m.subs[id]; ok {
+		s, ok := m.subs[id]
+		if ok {
 			delete(m.subs, id)
-			close(c)
+		}
+		m.subMu.Unlock()
+		if ok {
+			s.close()
 		}
 	}
-	return ch, cancel
+	return sub.out, cancel
 }
 
 func (m *Manager) resolveRunningPorts(ids []string) (map[string]int, error) {
@@ -920,12 +1476,13 @@ func (m *Manager) emitLog(instID, msg string) {
 
 func (m *Manager) emit(ev Event) {
 	m.subMu.RLock()
-	defer m.subMu.RUnlock()
-	for _, ch := range m.subs {
-		select {
-		case ch <- ev:
-		default:
-		}
+	subs := make([]*eventSubscriber, 0, len(m.subs))
+	for _, s := range m.subs {
+		subs = append(subs, s)
+	}
+	m.subMu.RUnlock()
+	for _, s := range subs {
+		s.enqueue(ev)
 	}
 }
 

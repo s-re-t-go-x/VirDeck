@@ -85,6 +85,22 @@ func TestTileRejectsInvalidAndInsufficientGeometry(t *testing.T) {
 	}
 }
 
+func TestTileGridRespectsExplicitColumns(t *testing.T) {
+	windows := make([]Window, 4)
+	for i := range windows {
+		windows[i] = Window{Bounds: Rect{Width: 100, Height: 200}, ClientWidth: 100, ClientHeight: 200}
+	}
+	got, err := TileGrid(Rect{Width: 1000, Height: 900}, windows, 3, 0, 10)
+	if err != nil || len(got) != 4 {
+		t.Fatalf("TileGrid(cols=3)=%+v, %v", got, err)
+	}
+	// First 3 on row 1 (same Y), 4th on row 2 (larger Y).
+	if got[0].Y != got[1].Y || got[1].Y != got[2].Y || got[3].Y <= got[0].Y {
+		t.Fatalf("expected 3 windows on row 1 and 1 on row 2: %+v", got)
+	}
+	assertLayout(t, Rect{Width: 1000, Height: 900}, got, 10)
+}
+
 func assertLayout(t *testing.T, work Rect, rs []Rect, gap int) {
 	t.Helper()
 	for i, r := range rs {

@@ -13,9 +13,46 @@ import (
 	"virdeck/config"
 
 	"virdeck/assets"
+	"virdeck/core/emu"
 	"virdeck/core/screenlayout"
 	"virdeck/core/service"
 )
+
+var cliStdin io.Reader = os.Stdin
+
+func resolveCLIProxy(fs *flag.FlagSet, flagName, flagVal string, fromStdin bool) (string, error) {
+	flagSet := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == flagName {
+			flagSet = true
+		}
+	})
+	if fromStdin && flagSet {
+		return "", errors.New("不能同时通过命令行参数与 -proxy-stdin 指定代理地址")
+	}
+	if fromStdin {
+		raw, err := io.ReadAll(io.LimitReader(cliStdin, 4097))
+		if err != nil {
+			return "", fmt.Errorf("从标准输入读取代理地址失败: %w", err)
+		}
+		if len(raw) > 4096 {
+			return "", errors.New("标准输入代理地址超过长度限制")
+		}
+		trimmed := strings.TrimRight(string(raw), "\r\n")
+		trimmed = strings.TrimSpace(trimmed)
+		if strings.ContainsAny(trimmed, "\r\n\x00") {
+			return "", errors.New("代理地址不能包含换行符或空字符")
+		}
+		return trimmed, nil
+	}
+	if flagSet {
+		return flagVal, nil
+	}
+	if v, ok := os.LookupEnv("VIRDECK_PROXY"); ok {
+		return strings.TrimSpace(v), nil
+	}
+	return "", nil
+}
 
 // Run executes the CLI adapter against the provided core Service.
 func Run(ctx context.Context, svc service.Service, args []string, out io.Writer) error {
@@ -44,8 +81,6 @@ func Run(ctx context.Context, svc service.Service, args []string, out io.Writer)
 		return runList(ctx, svc, out)
 	case "create":
 		return runCreate(ctx, svc, rest, out)
-	case "clone":
-		return runClone(ctx, svc, rest, out)
 	case "start":
 		return runStart(ctx, svc, rest, out)
 	case "stop":
@@ -60,6 +95,20 @@ func Run(ctx context.Context, svc service.Service, args []string, out io.Writer)
 		return runShell(ctx, svc, rest, out)
 	case "screen", "scrcpy":
 		return runScreen(ctx, svc, rest, out)
+	case "geo", "gps":
+		return runGeo(ctx, svc, rest, out)
+	case "screenshot", "screencap":
+		return runScreenshot(ctx, svc, rest, out)
+	case "apps":
+		return runApps(ctx, svc, rest, out)
+	case "disk-clean":
+		return runDiskClean(ctx, svc, rest, out)
+	case "backup":
+		return runBackup(ctx, svc, rest, out)
+	case "restore":
+		return runRestore(ctx, svc, rest, out)
+	case "__socks-bridge":
+		return runSocksBridgeHelper(rest, out)
 	default:
 		printUsage(out)
 		return fmt.Errorf("未知子命令: %s", sub)
@@ -79,18 +128,23 @@ func printUsage(w io.Writer) {
   bootstrap [-tool all|adb|emulator|scrcpy] [-zip <离线包路径>]
                                          一键下载补齐或离线导入基础运行工具
   list | ls                              列出所有已注册的模拟器实例及状态
-  create -name <前缀> -image <镜像包> [-count <数量>] [-mem <MB>] [-cores <核数>] [-res 720p|1080p] [-proxy <url>] [-headless=true]
-                                         纯 Go 批量创建干净的 AVD 实例（无 JDK 依赖）
-  clone -src <ID或名称> [-count 1]       从已停止的源实例克隆新实例（可选功能）
+  create -name <前缀> -image <镜像包> [-count <数量>] [-mem <MB>] [-cores <核数>] [-storage <GB>] [-res 720p|1080p|tablet] [-quickboot=false] [-proxy <url>|-proxy-stdin] [-headless=true]
+                                         纯 Go 批量创建干净的 AVD 实例（无 JDK 依赖；也可通过 VIRDECK_PROXY 环境变量传代理）
   start [-wait=true] <ID|名称|all>...    启动一个或多个实例（默认等待引导完成）
   stop <ID|名称|all>...                  优雅停止一个或多个实例（超时强杀进程树）
   delete | rm <ID|名称>...               停止并彻底删除指定实例
-  proxy -id <ID或名称> -url <代理地址>   设置或清空实例的 HTTP 代理（传空字符串清空）
-  install -apk <路径> <ID|名称|running>...
-                                         向指定（或全部运行中）实例并发安装 APK
+  proxy -id <ID或名称> [-url <代理地址>|-proxy-stdin]                    设置或清空实例的网络代理（传 -url "" 清空，支持 VIRDECK_PROXY）
+  install -apk <路径> [-start] [-launch] [-grant] [-screen] <ID|名称|running|all>...
+                                         向指定实例安装 APK（可选自动开机/拉起应用/授常规权限/打开投屏）
   shell -cmd "<命令>" <ID|名称|running>...
                                          向指定（或全部运行中）实例并发执行 adb shell 命令
-  screen [-x X -y Y -width W -height H] <ID或名称>                      拉起指定运行中实例的 scrcpy 独立投屏窗口`)
+  screen [-x X -y Y -width W -height H] <ID或名称>                      拉起指定运行中实例的 scrcpy 独立投屏窗口
+  geo -lat <纬度> -lon <经度> [<ID|名称|running>...]                    向运行中实例注入虚拟 GPS 坐标
+  screenshot [-out <目录>] [<ID|名称|running>...]                       通过 adb exec-out 批量截取实例屏幕为 PNG
+  apps -id <ID或名称> [-all] [-launch|-stop|-clear|-uninstall <包名>]   查看或管理运行中实例内已安装应用
+  disk-clean -id <ID或名称>                                              运行中执行 fstrim，停机状态下清理缓存并压缩 qcow2 镜像
+  backup -id <ID或名称> [-out <zip路径>] [-include-proxy]                 导出已停止实例为便携式 .zip 备份（默认不含代理）
+  restore -zip <zip路径> [-name <实例名称>] [-include-proxy]            从备份压缩包还原为新实例（默认不继承代理）`)
 }
 
 func runEnv(ctx context.Context, svc service.Service, out io.Writer) error {
@@ -99,6 +153,16 @@ func runEnv(ctx context.Context, svc service.Service, out io.Writer) error {
 		return err
 	}
 	fmt.Fprintf(out, "数据根目录:     %s\n", emptyFallback(st.DataDir, "(未检测到)"))
+	if st.EffectiveDataDir != "" && st.EffectiveDataDir != st.DataDir {
+		mode := st.PathCompatMode
+		switch mode {
+		case "shortpath":
+			mode = "8.3 短路径"
+		case "junction":
+			mode = "NTFS 目录联接"
+		}
+		fmt.Fprintf(out, "运行映射路径:   %s (%s)\n", st.EffectiveDataDir, mode)
+	}
 	fmt.Fprintf(out, "SDK 根目录:     %s\n", emptyFallback(st.SDKRoot, "(未检测到)"))
 	fmt.Fprintf(out, "AVD 存储目录:   %s\n", emptyFallback(st.AVDHome, "(未检测到)"))
 	fmt.Fprintf(out, "emulator 路径:  %s\n", emptyFallback(st.EmulatorPath, "(未找到)"))
@@ -199,7 +263,7 @@ func runList(ctx context.Context, svc service.Service, out io.Writer) error {
 		if it.Port > 0 {
 			portStr = fmt.Sprintf("%d", it.Port)
 		}
-		proxyStr := emptyFallback(it.Proxy, "-")
+		proxyStr := emptyFallback(config.RedactProxyURL(it.Proxy), "-")
 		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%d\t%d\t%v\t%s\t%s\n",
 			it.ID, it.Name, it.State, portStr, it.MemoryMB, it.Cores, it.Headless, proxyStr, it.SystemImage)
 	}
@@ -214,10 +278,17 @@ func runCreate(ctx context.Context, svc service.Service, args []string, out io.W
 	count := fs.Int("count", config.Values.Create.Count, "创建数量")
 	mem := fs.Int("mem", config.Values.Create.MemoryMB, "内存大小 (MB)")
 	cores := fs.Int("cores", config.Values.Create.Cores, "CPU 核数")
-	res := fs.String("res", config.Values.Create.Resolution, "分辨率预设 (720p 或 1080p)")
-	proxy := fs.String("proxy", "", "HTTP 代理地址 (例如 http://127.0.0.1:7890)")
+	res := fs.String("res", config.Values.Create.Resolution, "分辨率预设 (720p、1080p、tablet 或 宽x高@DPI)")
+	storage := fs.Int("storage", 6, "实例存储容量 (GB，4–128)")
+	quickboot := fs.Bool("quickboot", false, "启用快速启动快照")
+	proxy := fs.String("proxy", "", "代理地址 (支持 http:// 或 socks5://；也可用 VIRDECK_PROXY)")
+	proxyStdin := fs.Bool("proxy-stdin", false, "从标准输入读取代理地址（避免在命令行历史与进程列表暴露凭据）")
 	headless := fs.Bool("headless", config.Values.Create.Headless, "无窗口省资源运行 (-no-window)")
 	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	resolvedProxy, err := resolveCLIProxy(fs, "proxy", *proxy, *proxyStdin)
+	if err != nil {
 		return err
 	}
 
@@ -235,34 +306,14 @@ func runCreate(ctx context.Context, svc service.Service, args []string, out io.W
 		SystemImage: sysImg,
 		MemoryMB:    *mem,
 		Cores:       *cores,
+		StorageGB:   *storage,
 		Resolution:  *res,
-		Proxy:       *proxy,
+		QuickBoot:   *quickboot,
+		Proxy:       resolvedProxy,
 		Headless:    *headless,
 	})
 	for _, inst := range created {
 		fmt.Fprintf(out, "已创建实例: %s (%s)\n", inst.Name, inst.ID)
-	}
-	return err
-}
-
-func runClone(ctx context.Context, svc service.Service, args []string, out io.Writer) error {
-	fs := flag.NewFlagSet("clone", flag.ContinueOnError)
-	fs.SetOutput(out)
-	src := fs.String("src", "", "源实例 ID 或名称")
-	count := fs.Int("count", config.Values.CloneCount, "克隆数量")
-	if err := fs.Parse(args); err != nil {
-		return err
-	}
-	if strings.TrimSpace(*src) == "" {
-		return errors.New("请通过 -src 指定源实例 ID 或名称")
-	}
-	ids, err := resolveTargets(ctx, svc, []string{*src})
-	if err != nil {
-		return err
-	}
-	cloned, err := svc.Clone(ctx, ids[0], *count)
-	for _, inst := range cloned {
-		fmt.Fprintf(out, "已克隆实例: %s (%s)\n", inst.Name, inst.ID)
 	}
 	return err
 }
@@ -311,7 +362,7 @@ func runStart(ctx context.Context, svc service.Service, args []string, out io.Wr
 		select {
 		case ev := <-evCh:
 			if ev.Message != "" {
-				fmt.Fprintf(out, "[%s] %s\n", ev.Timestamp, ev.Message)
+				fmt.Fprintf(out, "[%s] %s\n", ev.Timestamp, config.RedactText(ev.Message))
 			}
 		case <-time.After(500 * time.Millisecond):
 		case <-ctx.Done():
@@ -354,22 +405,27 @@ func runProxy(ctx context.Context, svc service.Service, args []string, out io.Wr
 	fs := flag.NewFlagSet("proxy", flag.ContinueOnError)
 	fs.SetOutput(out)
 	target := fs.String("id", "", "实例 ID 或名称")
-	url := fs.String("url", "", "HTTP 代理地址 (为空则清除代理)")
+	url := fs.String("url", "", "网络代理地址 (传空字符串清空，也可用 VIRDECK_PROXY)")
+	proxyStdin := fs.Bool("proxy-stdin", false, "从标准输入读取代理地址（避免在命令行历史与进程列表暴露凭据）")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if strings.TrimSpace(*target) == "" {
 		return errors.New("请通过 -id 指定实例 ID 或名称")
 	}
+	resolvedProxy, err := resolveCLIProxy(fs, "url", *url, *proxyStdin)
+	if err != nil {
+		return err
+	}
 	ids, err := resolveTargets(ctx, svc, []string{*target})
 	if err != nil {
 		return err
 	}
 	for _, id := range ids {
-		if err := svc.SetProxy(ctx, id, *url); err != nil {
+		if err := svc.SetProxy(ctx, id, resolvedProxy); err != nil {
 			return err
 		}
-		fmt.Fprintf(out, "已更新实例 %s 的代理为 %q\n", id, *url)
+		fmt.Fprintf(out, "已更新实例 %s 的代理为 %q\n", id, config.RedactProxyURL(resolvedProxy))
 	}
 	return nil
 }
@@ -377,7 +433,11 @@ func runProxy(ctx context.Context, svc service.Service, args []string, out io.Wr
 func runInstall(ctx context.Context, svc service.Service, args []string, out io.Writer) error {
 	fs := flag.NewFlagSet("install", flag.ContinueOnError)
 	fs.SetOutput(out)
-	apk := fs.String("apk", "", "要安装的 APK 文件路径")
+	apk := fs.String("apk", "", "要安装的 APK / APKS / XAPK 文件路径")
+	autoStart := fs.Bool("start", false, "若目标实例未启动则自动开机并等待就绪")
+	launch := fs.Bool("launch", false, "安装完成后自动解析并拉起桌面入口")
+	grant := fs.Bool("grant", false, "安装时自动授予常规运行时权限 (-g)")
+	screen := fs.Bool("screen", false, "完成后自动打开 scrcpy 投屏（仅无头实例）")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -392,7 +452,18 @@ func runInstall(ctx context.Context, svc service.Service, args []string, out io.
 	if err != nil {
 		return err
 	}
-	if err := svc.InstallAPK(ctx, ids, *apk); err != nil {
+	if *autoStart || *launch || *grant || *screen {
+		err = svc.InstallApp(ctx, service.InstallAppRequest{
+			InstanceIDs:      ids,
+			APKPath:          *apk,
+			GrantPermissions: *grant,
+			LaunchApp:        *launch,
+			OpenScreen:       *screen,
+		})
+	} else {
+		err = svc.InstallAPK(ctx, ids, *apk)
+	}
+	if err != nil {
 		return err
 	}
 	fmt.Fprintf(out, "已成功向 %d 个实例安装 %s\n", len(ids), *apk)
@@ -461,6 +532,192 @@ func runScreen(ctx context.Context, svc service.Service, args []string, out io.W
 		fmt.Fprintf(out, "已拉起实例 %s 的 scrcpy 窗口\n", id)
 	}
 	return nil
+}
+
+func runGeo(ctx context.Context, svc service.Service, args []string, out io.Writer) error {
+	fs := flag.NewFlagSet("geo", flag.ContinueOnError)
+	fs.SetOutput(out)
+	lat := fs.Float64("lat", 0, "目标纬度 (-90 ~ 90)")
+	lon := fs.Float64("lon", 0, "目标经度 (-180 ~ 180)")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	hasLat, hasLon := false, false
+	fs.Visit(func(f *flag.Flag) {
+		switch f.Name {
+		case "lat":
+			hasLat = true
+		case "lon":
+			hasLon = true
+		}
+	})
+	if !hasLat || !hasLon {
+		return errors.New("请同时通过 -lat 与 -lon 指定经纬度")
+	}
+	targets := fs.Args()
+	if len(targets) == 0 {
+		targets = []string{"running"}
+	}
+	ids, err := resolveTargets(ctx, svc, targets)
+	if err != nil {
+		return err
+	}
+	if err := svc.SetLocation(ctx, ids, *lat, *lon); err != nil {
+		return err
+	}
+	fmt.Fprintf(out, "已对 %d 个实例注入虚拟定位 (lat=%.6f, lon=%.6f)\n", len(ids), *lat, *lon)
+	return nil
+}
+
+func runScreenshot(ctx context.Context, svc service.Service, args []string, out io.Writer) error {
+	fs := flag.NewFlagSet("screenshot", flag.ContinueOnError)
+	fs.SetOutput(out)
+	outDir := fs.String("out", "", "截图输出目录（默认为 VirDeckData/screenshots）")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	targets := fs.Args()
+	if len(targets) == 0 {
+		targets = []string{"running"}
+	}
+	ids, err := resolveTargets(ctx, svc, targets)
+	if err != nil {
+		return err
+	}
+	paths, err := svc.CaptureScreenshots(ctx, ids, *outDir)
+	for id, p := range paths {
+		fmt.Fprintf(out, "[%s] %s\n", id, p)
+	}
+	return err
+}
+
+func runApps(ctx context.Context, svc service.Service, args []string, out io.Writer) error {
+	fs := flag.NewFlagSet("apps", flag.ContinueOnError)
+	fs.SetOutput(out)
+	target := fs.String("id", "", "目标实例 ID 或名称")
+	allApps := fs.Bool("all", false, "包含系统应用（默认仅列出第三方应用）")
+	launchPkg := fs.String("launch", "", "启动指定包名")
+	stopPkg := fs.String("stop", "", "强行停止指定包名")
+	clearPkg := fs.String("clear", "", "清除指定包名数据")
+	uninstallPkg := fs.String("uninstall", "", "卸载指定包名")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if strings.TrimSpace(*target) == "" {
+		return errors.New("请通过 -id 指定实例 ID 或名称")
+	}
+	ids, err := resolveTargets(ctx, svc, []string{*target})
+	if err != nil {
+		return err
+	}
+	id := ids[0]
+	var op, pkg string
+	for _, item := range []struct {
+		op, val string
+	}{
+		{"launch", *launchPkg},
+		{"stop", *stopPkg},
+		{"clear", *clearPkg},
+		{"uninstall", *uninstallPkg},
+	} {
+		if strings.TrimSpace(item.val) != "" {
+			if op != "" {
+				return errors.New("一次只能指定一个操作（-launch / -stop / -clear / -uninstall）")
+			}
+			op, pkg = item.op, strings.TrimSpace(item.val)
+		}
+	}
+	if op != "" {
+		if err := svc.ManageInstalledApp(ctx, id, pkg, op); err != nil {
+			return err
+		}
+		fmt.Fprintf(out, "已对实例 %s 的 %s 执行 %s\n", id, pkg, op)
+		return nil
+	}
+	apps, err := svc.ListInstalledApps(ctx, id, !*allApps)
+	if err != nil {
+		return err
+	}
+	for _, app := range apps {
+		fmt.Fprintln(out, app.PackageName)
+	}
+	return nil
+}
+
+func runDiskClean(ctx context.Context, svc service.Service, args []string, out io.Writer) error {
+	fs := flag.NewFlagSet("disk-clean", flag.ContinueOnError)
+	fs.SetOutput(out)
+	target := fs.String("id", "", "目标实例 ID 或名称")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if strings.TrimSpace(*target) == "" {
+		return errors.New("请通过 -id 指定实例 ID 或名称")
+	}
+	ids, err := resolveTargets(ctx, svc, []string{*target})
+	if err != nil {
+		return err
+	}
+	res, err := svc.CleanInstanceDisk(ctx, ids[0])
+	if err != nil {
+		return err
+	}
+	fmt.Fprintln(out, res.Message)
+	return nil
+}
+
+func runBackup(ctx context.Context, svc service.Service, args []string, out io.Writer) error {
+	fs := flag.NewFlagSet("backup", flag.ContinueOnError)
+	fs.SetOutput(out)
+	target := fs.String("id", "", "要备份的已停止实例 ID 或名称")
+	destZip := fs.String("out", "", "输出 .zip 路径（默认为 VirDeckData/backups/）")
+	includeProxy := fs.Bool("include-proxy", false, "在备份中包含实例代理配置（可能含敏感凭据）")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if strings.TrimSpace(*target) == "" {
+		return errors.New("请通过 -id 指定实例 ID 或名称")
+	}
+	ids, err := resolveTargets(ctx, svc, []string{*target})
+	if err != nil {
+		return err
+	}
+	res, err := svc.BackupInstanceWithOptions(ctx, ids[0], *destZip, service.BackupOptions{IncludeProxy: *includeProxy})
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(out, "已备份至 %s (%d 字节)\n", res.Path, res.SizeBytes)
+	return nil
+}
+
+func runRestore(ctx context.Context, svc service.Service, args []string, out io.Writer) error {
+	fs := flag.NewFlagSet("restore", flag.ContinueOnError)
+	fs.SetOutput(out)
+	srcZip := fs.String("zip", "", "要还原的 .zip 备份文件路径")
+	name := fs.String("name", "", "可选的新实例显示名称")
+	includeProxy := fs.Bool("include-proxy", false, "从备份元数据中继承网络代理配置（仅限本人可信备份）")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if strings.TrimSpace(*srcZip) == "" {
+		return errors.New("请通过 -zip 指定备份文件路径")
+	}
+	inst, err := svc.RestoreInstanceWithOptions(ctx, *srcZip, *name, service.RestoreOptions{IncludeProxy: *includeProxy})
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(out, "已还原实例 %s (%s)\n", inst.Name, inst.ID)
+	return nil
+}
+
+func runSocksBridgeHelper(args []string, out io.Writer) error {
+	fs := flag.NewFlagSet("__socks-bridge", flag.ContinueOnError)
+	fs.SetOutput(out)
+	watchPort := fs.Int("watch-port", 0, "监视的模拟器控制台端口")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	return emu.RunSOCKSBridgeHelper(*watchPort, os.Stdin, out)
 }
 
 func resolveTargets(ctx context.Context, svc service.Service, raw []string) ([]string, error) {

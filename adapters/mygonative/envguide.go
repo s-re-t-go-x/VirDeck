@@ -60,6 +60,19 @@ func buildEnvChecksForHost(env service.EnvStatus, host string) []envCheck {
 	pathDetail := env.DataDir
 	if strings.TrimSpace(pathDetail) == "" {
 		pathDetail = env.AVDHome
+	} else if env.EffectiveDataDir != "" && env.EffectiveDataDir != env.DataDir {
+		mode := env.PathCompatMode
+		switch mode {
+		case "shortpath":
+			mode = "8.3 短路径"
+		case "junction":
+			mode = "NTFS 目录联接"
+		}
+		if mode != "" {
+			pathDetail = fmt.Sprintf("%s（已经 %s 映射为 %s）", pathDetail, mode, env.EffectiveDataDir)
+		} else {
+			pathDetail = fmt.Sprintf("%s（已透明映射：%s）", pathDetail, env.EffectiveDataDir)
+		}
 	}
 	pathCheck := envCheck{
 		name:     "数据目录与权限",
@@ -75,7 +88,7 @@ func buildEnvChecksForHost(env service.EnvStatus, host string) []envCheck {
 			pathCheck.detail = "未就绪"
 			pathCheck.impact = "Google 官方模拟器底层不支持含中文/非 ASCII 字符或无写入权限的目录。"
 		}
-		pathCheck.fix = "请将 VirDeck 放置在纯英文/数字且有读写权限的路径下（如 D:\\VirDeck）。"
+		pathCheck.fix = "请点击「一键改用纯英文数据目录」自动迁移入口，或将程序移至纯英文/数字且可写的路径下（如 D:\\VirDeck）。"
 		if host != "windows" {
 			pathCheck.impact = "数据目录不可写，无法保存设置和实例数据。"
 			pathCheck.fix = "请选择当前用户可读写的数据目录，或通过 VIRDECK_DATA_DIR 指定位置。"

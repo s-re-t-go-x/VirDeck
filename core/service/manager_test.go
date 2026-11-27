@@ -26,7 +26,6 @@ type fakeEmu struct {
 	arrangeErr                                 error
 	mu                                         sync.Mutex
 	created                                    []string
-	cloned                                     []string
 	deleted                                    []string
 	procs                                      map[int]chan error
 	killErr                                    error
@@ -61,13 +60,6 @@ func (f *fakeEmu) CreateAVD(ctx context.Context, name, systemImage string, memor
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.created = append(f.created, name)
-	return nil
-}
-
-func (f *fakeEmu) CloneAVD(srcName, dstName string) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.cloned = append(f.cloned, dstName)
 	return nil
 }
 
@@ -177,7 +169,7 @@ func newTestManager(t *testing.T, maxConc int, grace time.Duration) (*Manager, *
 		adb:       fa,
 		running:   make(map[string]*runningEntry),
 		usedPorts: make(map[int]string),
-		subs:      make(map[int]chan Event),
+		subs:      make(map[int]*eventSubscriber),
 	}
 	return m, fe, fa
 }
@@ -441,9 +433,6 @@ func TestBootTimeoutKillFailureKeepsResourcesUntilStopped(t *testing.T) {
 	}
 	if err := m.Start(context.Background(), id); err == nil {
 		t.Fatal("retry must not report success while the failed process is alive")
-	}
-	if _, err := m.Clone(context.Background(), id, 1); err == nil {
-		t.Fatal("service must refuse cloning a failed process that is still alive")
 	}
 	if err := m.Stop(context.Background(), id); err != nil {
 		t.Fatal(err)

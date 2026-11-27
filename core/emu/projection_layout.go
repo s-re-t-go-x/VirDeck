@@ -12,7 +12,7 @@ import (
 
 type ScreenLayoutOptions struct {
 	DisplayID, ReferenceID string
-	Height, Gap            int // logical pixels, zero height uses current window height
+	Height, Gap, Columns   int // logical pixels, zero height uses current window height; Columns > 0 fixes windows per row
 	FillOnly               bool
 }
 type SavedProjection struct {
@@ -209,42 +209,56 @@ func (c *Controller) ArrangeProjection(ctx context.Context, ids []string, opt Sc
 		w.Bounds.Height = w.ClientHeight + int(math.Ceil(float64(max(0, w.Bounds.Height-w.ClientHeight))*ratio))
 		geometry[i] = w
 	}
-	// Reserve original rectangles of windows that cannot fit, then replan the rest.
-	active := make([]int, len(windows))
-	for i := range active {
-		active[i] = i
-	}
 	placements := map[int]screenlayout.Rect{}
 	skipped := 0
-	for len(active) > 0 {
-		input := make([]screenlayout.Window, len(active))
-		for i, index := range active {
-			input[i] = geometry[index]
+	if opt.Columns > 0 && !hasRef && !opt.FillOnly && len(occupied) == 0 {
+		capHeight := 0
+		if opt.Height > 0 {
+			capHeight = height
 		}
-		packed, err := screenlayout.Pack(target.WorkArea, input, height, gap, occupied, anchor)
+		rects, err := screenlayout.TileGrid(target.WorkArea, geometry, opt.Columns, capHeight, gap)
 		if err != nil {
 			return 0, err
 		}
-		found := map[int]screenlayout.Rect{}
-		for _, p := range packed {
-			found[p.Index] = p.Bounds
+		for i, r := range rects {
+			placements[i] = r
 		}
-		if len(found) == len(active) {
-			for i, r := range found {
-				placements[active[i]] = r
+	} else {
+		// Reserve original rectangles of windows that cannot fit, then replan the rest.
+		active := make([]int, len(windows))
+		for i := range active {
+			active[i] = i
+		}
+		for len(active) > 0 {
+			input := make([]screenlayout.Window, len(active))
+			for i, index := range active {
+				input[i] = geometry[index]
 			}
-			break
-		}
-		var next []int
-		for i, index := range active {
-			if _, ok := found[i]; ok {
-				next = append(next, index)
-			} else {
-				occupied = append(occupied, occupiedProjection(windows[index], displays))
-				skipped++
+			packed, err := screenlayout.Pack(target.WorkArea, input, height, gap, occupied, anchor)
+			if err != nil {
+				return 0, err
 			}
+			found := map[int]screenlayout.Rect{}
+			for _, p := range packed {
+				found[p.Index] = p.Bounds
+			}
+			if len(found) == len(active) {
+				for i, r := range found {
+					placements[active[i]] = r
+				}
+				break
+			}
+			var next []int
+			for i, index := range active {
+				if _, ok := found[i]; ok {
+					next = append(next, index)
+				} else {
+					occupied = append(occupied, occupiedProjection(windows[index], displays))
+					skipped++
+				}
+			}
+			active = next
 		}
-		active = next
 	}
 	count := 0
 	var errs []error

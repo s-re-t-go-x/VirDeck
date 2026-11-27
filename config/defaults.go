@@ -8,6 +8,7 @@ import (
 	"errors"
 	"io"
 	"runtime"
+	"strings"
 )
 
 //go:embed defaults.json
@@ -42,16 +43,19 @@ type Sources struct {
 	DefaultXML    string `json:"defaultXML"`
 	PlatformTools string `json:"platformTools"`
 	Scrcpy        string `json:"scrcpy"`
+	ScrcpySHA256  string `json:"scrcpySha256,omitempty"`
 }
 
 type ToolSources struct {
 	PlatformTools string `json:"platformTools"`
 	Scrcpy        string `json:"scrcpy"`
+	ScrcpySHA256  string `json:"scrcpySha256,omitempty"`
 }
 type ImagePreset struct {
 	// FavoriteVersion identifies the release that first seeded this default favorite.
 	FavoriteVersion int    `json:"favoriteVersion,omitempty"`
 	SHA1            string `json:"sha1,omitempty"`
+	SHA256          string `json:"sha256,omitempty"`
 	ID              string `json:"id"`
 	Name            string `json:"name"`
 	APILevel        string `json:"apiLevel"`
@@ -60,6 +64,14 @@ type ImagePreset struct {
 	URL             string `json:"url"`
 	Favorite        bool   `json:"favorite"`
 	Note            string `json:"note"`
+}
+
+// EffectiveChecksum returns the preferred checksum for the preset (SHA-256 over SHA-1).
+func (p ImagePreset) EffectiveChecksum() string {
+	if s := strings.TrimSpace(p.SHA256); s != "" {
+		return s
+	}
+	return strings.TrimSpace(p.SHA1)
 }
 type ScreenLayoutDefaults struct {
 	AutoFill             bool   `json:"autoFill"`
@@ -123,7 +135,6 @@ type Defaults struct {
 	ProjectionPresets []ProjectionPreset     `json:"projectionPresets"`
 	Projection        ProjectionDefaults     `json:"projection"`
 	ScreenLayout      ScreenLayoutDefaults   `json:"screenLayout"`
-	CloneCount        int                    `json:"cloneCount"`
 	Create            CreateDefaults         `json:"create"`
 	Runtime           RuntimeDefaults        `json:"runtime"`
 	Sources           Sources                `json:"sources"`
@@ -170,9 +181,6 @@ func decode(raw []byte, d *Defaults) error {
 	if layout.Gap < 0 || layout.Gap > 100 || layout.SmallHeight < 1 || layout.MediumHeight < layout.SmallHeight || layout.LargeHeight < layout.MediumHeight || layout.WindowTimeoutSeconds < 1 || layout.WindowTimeoutSeconds > 60 {
 		return errors.New("默认投屏排版参数无效")
 	}
-	if d.CloneCount < 1 || d.CloneCount > 32 {
-		return errors.New("默认克隆数量无效")
-	}
 	if len(d.Images) == 0 {
 		return errors.New("默认镜像列表不能为空")
 	}
@@ -194,9 +202,9 @@ func ForHost(goos, goarch string) (Defaults, error) {
 		return d, err
 	}
 	if tools, ok := d.HostSources[goos+"/"+goarch]; ok {
-		d.Sources.PlatformTools, d.Sources.Scrcpy = tools.PlatformTools, tools.Scrcpy
+		d.Sources.PlatformTools, d.Sources.Scrcpy, d.Sources.ScrcpySHA256 = tools.PlatformTools, tools.Scrcpy, tools.ScrcpySHA256
 	} else {
-		d.Sources.PlatformTools, d.Sources.Scrcpy = "", ""
+		d.Sources.PlatformTools, d.Sources.Scrcpy, d.Sources.ScrcpySHA256 = "", "", ""
 	}
 	if goarch == "arm64" {
 		d.Images = append([]ImagePreset(nil), d.ARMImages...)

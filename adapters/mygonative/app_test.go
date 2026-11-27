@@ -5,9 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"image/png"
-	"math"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -68,10 +68,6 @@ func TestNativeViewRendersAllModals(t *testing.T) {
 	tester.Frame()
 	vm.showCreate = false
 
-	vm.showClone, vm.cloneSrcID = true, "e5f60718"
-	tester.Frame()
-	vm.showClone = false
-
 	vm.openProxy(vm.selectedInsts())
 	tester.Frame()
 	vm.showProxy = false
@@ -89,17 +85,18 @@ func TestNativeViewRendersAllModals(t *testing.T) {
 	tester.Frame()
 	vm.showMixed = false
 
-	vm.showEnv = true
-	vm.envTab = 0
-	tester.Frame()
-	vm.envTab = 1
+	vm.page = pageImages
+	vm.envTab = envTabImages
 	vm.showCustomImg = true
 	tester.Frame()
 	vm.showCustomImg = false
-	vm.showEnv = false
+	vm.envTab = envTabRuntime
+	tester.Frame()
 	vm.openSettings()
 	tester.Frame()
-	vm.showSettings = false
+	vm.page = pageLogs
+	tester.Frame()
+	vm.page = pageWorkbench
 	vm.showHelp = true
 	tester.Frame()
 	vm.showHelp = false
@@ -108,10 +105,17 @@ func TestNativeViewRendersAllModals(t *testing.T) {
 	tester.Frame()
 	vm.showLicense = false
 
+	vm.showEnvMissing = true
+	tester.Frame()
+	vm.showEnvMissing = false
+
+	vm.openInstallModalWithAPK(writeTempAPKForUITest(t, "com.example.ui", "arm64-v8a"), []string{"e5f60718"})
+	tester.Frame()
+	vm.showInstall = false
+
 	vm.tasksOpen = true
 	tester.Frame()
-	vm.panelTab = 1
-	tester.Frame()
+	vm.tasksOpen = false
 	tester.Frame()
 }
 
@@ -171,17 +175,17 @@ func TestLayoutAdaptsToWindowSize(t *testing.T) {
 
 	tester.SetSize(900, 600)
 	tester.Frame()
-	if tester.HasText("镜像与环境") || !tester.HasText("实例详情") {
-		t.Fatalf("medium window should hide navigation but keep detail: %v", tester.Texts())
+	if !tester.HasText("镜像与环境") || tester.HasText("实例详情") {
+		t.Fatalf("medium window should keep sidebar and hide detail: %v", tester.Texts())
 	}
 
 	tester.SetSize(700, 520)
 	tester.Frame()
-	if tester.HasText("实例详情") || !tester.HasText("实例工作台") {
+	if tester.HasText("实例详情") || tester.HasText("全部分组") || !tester.HasText("实例工作台") {
 		t.Fatalf("small window should keep only the list: %v", tester.Texts())
 	}
-	// The list stays usable and the single selection falls back to the action bar.
-	if !tester.HasText("account_01") || !tester.HasText("批量命令") {
+	// The list stays usable and the single selection falls back to the tiered action bar.
+	if !tester.HasText("account_01") || !tester.HasText("工具") {
 		t.Fatalf("small window lost list or action bar: %v", tester.Texts())
 	}
 }
@@ -219,30 +223,30 @@ func TestRenderScreenshotForReview(t *testing.T) {
 	shot("main_multi", 1180, 740, func() { vm.selected.Add("0a0b0c0d"); vm.selected.Add("e5f60718") })
 	shot("main_tasks", 1180, 740, func() { vm.tasksOpen = true })
 	shot("main_small", 700, 520, func() { vm.tasksOpen = false })
-	shot("modal_env", 1180, 740, func() { vm.showEnv = true; vm.envTab = 0 })
-	shot("modal_env_images", 1180, 740, func() { vm.showEnv = true; vm.envTab = 1 })
+	shot("modal_env", 1180, 740, func() { vm.page = pageImages; vm.envTab = envTabRuntime })
+	shot("modal_env_images", 1180, 740, func() { vm.page = pageImages; vm.envTab = envTabImages })
 	shot("modal_env_directories", 1180, 740, func() {
-		vm.envTab = 0
+		vm.envTab = envTabRuntime
 		vm.env.EmulatorPath, vm.env.ADBPath, vm.env.ScrcpyPath = "emulator.exe", "adb.exe", "scrcpy.exe"
 		vm.env.AccelOK = true
 		vm.env.DataDir = `C:\Users\SX\Downloads\01_Projects\Dev\VirDeck\VirDeckData`
 		vm.env.AVDHome = vm.env.DataDir + `\avd`
 	})
 	shot("modal_env_favorite", 1180, 740, func() {
-		vm.envTab = 1
+		vm.envTab = envTabImages
 		id := vm.catalog[1].ID
 		vm.saveImageFavorite(id, true, "工作账号 · 兼容性测试")
 		vm.favoriteID, vm.favoriteNote = id, "工作账号 · 兼容性测试"
 	})
 	shot("modal_cleanup", 1180, 740, func() {
-		vm.envTab = 2
+		vm.envTab = envTabCleanup
 		vm.cleanupScanned = true
 		vm.cleanupReport = service.CleanupReport{Downloads: service.CleanupSize{Files: 3, Bytes: 1400000000}, Partials: service.CleanupSize{Files: 2, Bytes: 300000000}, AVDCache: service.CleanupSize{Files: 4, Bytes: 138000000}}
 	})
-	shot("modal_settings", 1180, 740, func() { vm.showEnv = false; vm.openSettings() })
+	shot("modal_settings", 1180, 740, func() { vm.openSettings() })
 	shot("modal_settings_small", 640, 480, nil)
-	shot("modal_help", 1180, 740, func() { vm.showSettings = false; vm.showHelp = true })
-	shot("modal_license", 1180, 740, func() { vm.showHelp = false; vm.showEnv = false; vm.showLicense = true })
+	shot("modal_help", 1180, 740, func() { vm.page = pageWorkbench; vm.showHelp = true })
+	shot("modal_license", 1180, 740, func() { vm.showHelp = false; vm.showLicense = true })
 	shot("modal_create", 1180, 740, func() { vm.showLicense = false; vm.showCreate = true })
 	shot("modal_edit", 1180, 740, func() {
 		vm.showCreate = false
@@ -295,22 +299,23 @@ func TestCheckActionStateRules(t *testing.T) {
 		{actStop, running, "", true},
 		{actStop, starting, "", true},
 		{actStop, stopped, "", false},
-		{actClone, stopped, "", true},
-		{actClone, failed, "", true},
-		{actClone, running, "", false},
 		{actScreen, running, "", true},
 		{actScreen, starting, "", false},
 		{actScreen, stopped, "", false},
 		{actInstallAPK, running, "", true},
-		{actInstallAPK, stopped, "", false},
+		{actInstallAPK, stopped, "", true},
+		{actInstallAPK, starting, "", true},
+		{actInstallAPK, failed, "", true},
 		{actShell, running, "", true},
 		{actShell, failed, "", false},
 		{actProxy, stopped, "", true},
 		{actProxy, running, "", true},
 		{actDelete, running, "", true},
 		{actDelete, failed, "", true},
-		// A running task on the instance blocks every conflicting operation.
-		{actStop, running, "启动", false},
+		// A running task on the instance blocks conflicting operations, while Stop can interrupt 启动 / 安装 APK.
+		{actStop, running, "启动", true},
+		{actStop, starting, "安装 APK", true},
+		{actStop, running, "停止", false},
 		{actDelete, stopped, "安装 APK", false},
 		{actProxy, stopped, "删除", false},
 	}
@@ -338,7 +343,7 @@ func TestMixedSelectionOnlyBlocksUnavailableInstances(t *testing.T) {
 		t.Fatalf("a partly eligible selection must stay clickable")
 	}
 
-	none := planAction(actClone, insts[:1], nil) // running only
+	none := planAction(actScreen, insts[1:2], nil) // stopped only
 	if none.disabledHint() == "" || none.mixed() {
 		t.Fatalf("fully ineligible selection must be disabled with a reason: %+v", none)
 	}
@@ -556,14 +561,26 @@ func TestSettingsOpensSeparateFromEnvironment(t *testing.T) {
 	if st := vm.svc.GetSettings(); st.DownloadProxy != "http://127.0.0.1:7891" || st.MaxConcurrent != 5 {
 		t.Fatalf("settings were not persisted: %+v", st)
 	}
-	if err := tester.Click("关闭设置"); err != nil {
+	vm.settingsAutoDeleteDownloads = true
+	if err := tester.Click("保存全局设置"); err != nil {
+		t.Fatal(err)
+	}
+	tester.Frame()
+	if st := vm.svc.GetSettings(); !st.AutoDeleteDownloads {
+		t.Fatalf("AutoDeleteDownloads was not persisted: %+v", st)
+	}
+	if got := proxyText("http://alice:secret@127.0.0.1:7890"); got != "http://alice:***@127.0.0.1:7890" {
+		t.Fatalf("proxyText leaked password: %q", got)
+	}
+	if err := tester.Click("返回工作台"); err != nil {
 		t.Fatal(err)
 	}
 	tester.Frame()
 	if tester.HasText("保存全局设置") {
-		t.Fatal("settings did not close")
+		t.Fatal("settings did not switch back to workbench")
 	}
-	vm.showEnv = true
+	vm.page = pageImages
+	vm.envTab = envTabImages
 	tester.Frame()
 	if tester.HasText("保存全局设置") || !tester.HasText("系统镜像") {
 		t.Fatal("environment must contain components and images, without duplicating settings")
@@ -592,21 +609,33 @@ func TestInstanceCheckboxesKeepIndependentSelections(t *testing.T) {
 	}
 }
 
-func TestDetailMenuRetainsCloneAction(t *testing.T) {
+func TestStopInterruptsBusyStartTask(t *testing.T) {
 	vm := newTestVM(t)
-	vm.selected.Add("e5f60718")
-	tester := ui.NewTester(vm.view, 1180, 740)
-	tester.Frame()
-	if err := tester.Click("更多操作"); err != nil {
-		t.Fatal(err)
+	started := make(chan struct{})
+	ctxCanceled := make(chan struct{}, 1)
+	inst := vm.instances[1]
+	inst.State = service.Starting
+	inst.Port = 5556
+
+	vm.startTask("启动", actStart, []target{{id: inst.ID, name: inst.Name}}, true, func(ctx context.Context, _ target) error {
+		close(started)
+		<-ctx.Done()
+		select {
+		case ctxCanceled <- struct{}{}:
+		default:
+		}
+		return ctx.Err()
+	}, nil)
+
+	if ok, reason := checkAction(actStop, inst, vm.busy[inst.ID]); !ok {
+		t.Fatalf("expected actStop to be allowed to interrupt busy start, got reason=%q", reason)
 	}
-	tester.Frame()
-	if err := tester.ChooseMenuItem("克隆"); err != nil {
-		t.Fatal(err)
-	}
-	tester.Frame()
-	if !vm.showClone || vm.cloneSrcID != "e5f60718" {
-		t.Fatal("detail menu did not open clone for the selected device")
+	<-started
+	vm.cancelInstanceTask(inst.ID)
+	select {
+	case <-ctxCanceled:
+	case <-time.After(time.Second):
+		t.Fatal("cancelInstanceTask did not cancel active task context")
 	}
 }
 
@@ -640,13 +669,10 @@ func TestFailedBootWithLiveProcessCanOnlyStopBeforeRestart(t *testing.T) {
 	if ok, _ := checkAction(actStart, inst, ""); ok {
 		t.Fatal("must stop the failed process before retrying startup")
 	}
-	if ok, _ := checkAction(actClone, inst, ""); ok {
-		t.Fatal("must not clone a failed instance whose process is still alive")
-	}
 }
 
 func TestSidebarButtonsShowAndClearHoverFeedback(t *testing.T) {
-	for _, label := range []string{"镜像与环境", "设置", "使用帮助"} {
+	for _, label := range []string{"文件传输", "镜像与环境", "运行日志", "设置", "使用帮助"} {
 		t.Run(label, func(t *testing.T) {
 			vm := newTestVM(t)
 			tester := ui.NewTester(vm.view, 1180, 740)
@@ -800,7 +826,7 @@ func TestSecondaryMenusShowHoverAndUseSystemMenus(t *testing.T) {
 			}
 			item := "取消选择"
 			if label == "更多操作" {
-				item = "克隆"
+				item = "删除"
 			}
 			if tester.HasText(item) {
 				t.Fatal("menu was drawn inside the view instead of using the system menu")
@@ -926,25 +952,26 @@ func TestEnvironmentModalKeepsSymmetricPaddingAtNarrowWidths(t *testing.T) {
 			vm.env.DataDir = `C:\Users\SX\Downloads\01_Projects\Dev\VirDeck\dist\VirDeckData`
 			vm.env.SDKRoot = filepath.Join(vm.env.DataDir, "sdk")
 			vm.env.AVDHome = filepath.Join(vm.env.DataDir, "avd")
-			vm.env.EmulatorPath = filepath.Join(vm.env.SDKRoot, "emulator", "emulator.exe")
-			vm.env.ADBPath = filepath.Join(vm.env.SDKRoot, "platform-tools", "adb.exe")
-			vm.env.ScrcpyPath = filepath.Join(vm.env.DataDir, "scrcpy", "scrcpy.exe")
+			vm.env.EmulatorPath = ""
+			vm.env.ADBPath = ""
+			vm.env.ScrcpyPath = ""
 			vm.env.AccelOK = true
-			vm.showEnv = true
+			vm.showEnvMissing = true
 			tester := ui.NewTester(vm.view, width, 780)
 			tester.Frame()
-			title, ok := tester.Find("镜像与环境管理")
+			title, ok := tester.Find("检测到运行环境不完整")
 			if !ok {
-				t.Fatal("missing modal title")
+				t.Fatal("missing decision card title")
 			}
-			status, ok := tester.Find("运行环境已就绪")
+			badge, ok := tester.Find("缺少 2 项")
 			if !ok {
-				t.Fatal("missing header status")
+				t.Fatal("missing header missing count badge")
 			}
 			y := int(title.Y) - 8
 			panelLeft, panelRight := -1, -1
+			img := tester.Image()
 			for x := 0; x < width; x++ {
-				col := tester.Image().RGBAAt(x, y)
+				col := img.RGBAAt(x, y)
 				if col.R >= 250 && col.G >= 250 && col.B >= 250 {
 					if panelLeft < 0 {
 						panelLeft = x
@@ -956,19 +983,9 @@ func TestEnvironmentModalKeepsSymmetricPaddingAtNarrowWidths(t *testing.T) {
 				t.Fatal("modal panel not found")
 			}
 			left := title.X - float32(panelLeft)
-			right := float32(panelRight) - (status.X + status.W)
-			if dir := os.Getenv("VIRDECK_SHOT_DIR"); dir != "" {
-				f, err := os.Create(filepath.Join(dir, fmt.Sprintf("modal_env_padding_%d.png", width)))
-				if err != nil {
-					t.Fatal(err)
-				}
-				defer f.Close()
-				if err := png.Encode(f, tester.Image()); err != nil {
-					t.Fatal(err)
-				}
-			}
-			if left < 16 || right < 16 || math.Abs(float64(left-right)) > 2 {
-				t.Fatalf("asymmetric modal content padding: left=%.1f right=%.1f", left, right)
+			right := float32(panelRight) - (badge.X + badge.W)
+			if left < 16 || right < 16 {
+				t.Fatalf("narrow modal content padding: left=%.1f right=%.1f", left, right)
 			}
 		})
 	}
@@ -993,16 +1010,28 @@ func TestAllDialogsKeepNarrowWindowContentInsidePanel(t *testing.T) {
 			vm.screens.scope = screenScopeAll
 		}, (*viewModel).buildScreenLayoutModal},
 		{"create", "新建干净安卓实例", func(vm *viewModel) { vm.showCreate = true }, (*viewModel).buildCreateModal},
-		{"clone", "克隆实例（可选母版复制）", func(vm *viewModel) { vm.showClone = true; vm.cloneSrcID = "e5f60718" }, (*viewModel).buildCloneModal},
-		{"proxy", "设置 HTTP 代理（共 2 个实例）", func(vm *viewModel) { vm.openProxy(vm.instances[:2]) }, (*viewModel).buildProxyModal},
+		{"install", "安装并运行 APK", func(vm *viewModel) {
+			vm.install = installModalState{
+				apkPath:   "demo.apk",
+				targetIDs: map[string]bool{"e5f60718": true},
+			}
+			vm.showInstall = true
+		}, (*viewModel).buildInstallModal},
+		{"env_missing", "检测到运行环境不完整", func(vm *viewModel) { vm.showEnvMissing = true }, (*viewModel).buildEnvMissingModal},
+		{"proxy", "设置 HTTP / SOCKS5 代理（共 2 个实例）", func(vm *viewModel) { vm.openProxy(vm.instances[:2]) }, (*viewModel).buildProxyModal},
 		{"shell", "批量执行 ADB Shell 命令（1 个运行中的实例）", func(vm *viewModel) { vm.showShell = true; vm.shellTargets = vm.instances[:1] }, (*viewModel).buildShellModal},
 		{"delete", "确认删除 2 个实例？", func(vm *viewModel) { vm.showDelete = true; vm.deleteTargets = vm.instances[:2] }, (*viewModel).buildDeleteModal},
 		{"mixed", "「启动」只能对 2 台实例执行", func(vm *viewModel) { vm.showMixed = true; vm.mixedPlan = planAction(actStart, vm.instances, vm.busy) }, (*viewModel).buildMixedModal},
 		{"license", "Google Android SDK 许可协议确认", func(vm *viewModel) { vm.showLicense = true }, (*viewModel).buildLicenseModal},
-		{"environment", "镜像与环境管理", func(vm *viewModel) { vm.showEnv = true }, (*viewModel).buildEnvModal},
-		{"settings", "设置", func(vm *viewModel) { vm.openSettings() }, (*viewModel).buildSettingsModal},
 		{"help", "使用帮助", func(vm *viewModel) { vm.showHelp = true }, (*viewModel).buildHelpModal},
 		{"edit", "编辑实例", func(vm *viewModel) { vm.openEdit(vm.instances[0]) }, (*viewModel).buildEditModal},
+		{"input_sync", "多设备操作同步", func(vm *viewModel) { vm.openSyncModal() }, (*viewModel).buildSyncModal},
+		{"location", "虚拟定位", func(vm *viewModel) { vm.openLocationModal(vm.instances[:1]) }, (*viewModel).buildLocationModal},
+		{"apps", "应用管理", func(vm *viewModel) {
+			vm.appsTarget = vm.instances[0]
+			vm.appsList = []service.InstalledApp{{PackageName: "com.example.demo", ThirdParty: true}}
+			vm.showApps = true
+		}, (*viewModel).buildAppsModal},
 	}
 	for _, tc := range cases {
 		for _, width := range []int{610, 640, 1180} {
@@ -1017,8 +1046,9 @@ func TestAllDialogsKeepNarrowWindowContentInsidePanel(t *testing.T) {
 				}
 				y := int(title.Y) - 8
 				left, right := -1, -1
+				img := tester.Image()
 				for x := 0; x < width; x++ {
-					col := tester.Image().RGBAAt(x, y)
+					col := img.RGBAAt(x, y)
 					if col.R >= 250 && col.G >= 250 && col.B >= 250 {
 						if left < 0 {
 							left = x
@@ -1075,7 +1105,7 @@ func TestErrorFeedbackAndClipboardAndStartingProgress(t *testing.T) {
 	vm.appendLog("[10:00:05] 第二条日志")
 	_ = vm.startTaskForTest("启动", actStart)
 
-	// 1. Narrow window (< 900px) still shows "查看失败原因" in the dock bar.
+	// 1. Narrow window still shows "查看失败原因" in the floating task capsule.
 	tester := ui.NewTester(vm.view, 610, 480)
 	tester.Frame()
 	if !tester.HasText("模拟器进程在完成引导前意外退出") {
@@ -1084,13 +1114,19 @@ func TestErrorFeedbackAndClipboardAndStartingProgress(t *testing.T) {
 	if err := tester.Click("查看失败原因"); err != nil {
 		t.Fatalf("narrow window hid 查看失败原因 button: %v", err)
 	}
-	if !vm.tasksOpen || vm.panelTab != 0 {
-		t.Fatalf("clicking 查看失败原因 should open task panel tab 0, got open=%v tab=%d", vm.tasksOpen, vm.panelTab)
+	if !vm.tasksOpen {
+		t.Fatalf("clicking 查看失败原因 should open floating task card")
 	}
 
-	// 2. Switch to 运行日志 tab and click 复制日志.
-	vm.panelTab = 1
+	// 2. Navigate from floating card into full-page 运行日志 and click 复制日志.
 	tester.Frame()
+	if err := tester.Click("查看完整运行日志 →"); err != nil {
+		t.Fatalf("missing 查看完整运行日志 button: %v", err)
+	}
+	tester.Frame()
+	if vm.page != pageLogs {
+		t.Fatalf("expected pageLogs, got %v", vm.page)
+	}
 	if err := tester.Click("复制日志"); err != nil {
 		t.Fatalf("missing 复制日志 button: %v", err)
 	}
@@ -1098,7 +1134,8 @@ func TestErrorFeedbackAndClipboardAndStartingProgress(t *testing.T) {
 		t.Fatalf("unexpected copied logs: %q", vm.copiedText)
 	}
 
-	// 3. Select failed instance in wide window and click 复制错误 in detail pane.
+	// 3. Return to workbench, select failed instance in wide window, and click 复制错误 in detail pane.
+	vm.page = pageWorkbench
 	vm.tasksOpen = false
 	vm.selected.Clear()
 	vm.selected.Add("11223344") // base_01 (Failed)
@@ -1127,5 +1164,24 @@ func TestErrorFeedbackAndClipboardAndStartingProgress(t *testing.T) {
 	tester.Frame()
 	if _, ok := vm.startingSince[vm.instances[1].ID]; ok {
 		t.Fatal("starting timer should be cleared once instance leaves Starting state")
+	}
+}
+
+func TestSecurityBackupFilenameSanitizationAndOpenLocalDir(t *testing.T) {
+	if got := sanitizeBackupFileStem(`\\evil.example\share\payload`, "abc123"); strings.ContainsAny(got, `/\:`) {
+		t.Fatalf("sanitizeBackupFileStem leaked path/UNC separators: %q", got)
+	}
+	if got := sanitizeBackupFileStem("..", "abc123"); got != "abc123" {
+		t.Fatalf("expected fallback ID for dot-dot stem, got %q", got)
+	}
+	f := filepath.Join(t.TempDir(), "notadir.exe")
+	if err := os.WriteFile(f, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := openLocalDir(f); err == nil {
+		t.Fatal("openLocalDir must reject non-directory files")
+	}
+	if err := openLocalDir(`\\attacker\share`); err == nil {
+		t.Fatal("openLocalDir must reject UNC paths")
 	}
 }

@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"virdeck/config"
 	"virdeck/core/service"
 )
 
@@ -14,6 +15,8 @@ const (
 	taskWorkers  = 4
 	maxKeptTasks = 30
 )
+
+var groupStartStagger = 1500 * time.Millisecond
 
 type itemStatus int
 
@@ -38,6 +41,11 @@ func targetsOf(insts []service.Instance) []target {
 	return out
 }
 
+type taskStep struct {
+	label string
+	done  bool
+}
+
 type taskItem struct {
 	target
 	status itemStatus
@@ -47,15 +55,22 @@ type taskItem struct {
 // task is a batch operation with per-instance progress. All fields are only
 // read or written on the UI thread (through viewModel.post).
 type task struct {
-	id        int
-	title     string
-	act       action
-	items     []*taskItem
-	started   time.Time
-	finished  bool
-	retryable bool
-	op        func(ctx context.Context, t target) error
-	onDone    func(t *task)
+	id          int
+	title       string
+	act         action
+	items       []*taskItem
+	steps       []taskStep
+	currentStep int
+	stageText   string
+	progressPct int
+	cancel      context.CancelFunc
+	canceled    bool
+	started     time.Time
+	finished    bool
+	retryable   bool
+	stagger     time.Duration
+	op          func(ctx context.Context, t target) error
+	onDone      func(t *task)
 }
 
 // counts returns how many items have finished, succeeded and failed.
@@ -100,13 +115,21 @@ func (t *task) failedItems() []*taskItem {
 // with a small worker pool. It must be called on the UI thread.
 func (vm *viewModel) startTask(title string, act action, targets []target, retryable bool,
 	op func(ctx context.Context, t target) error, onDone func(t *task)) *task {
+	return vm.startStaggeredTask(title, act, targets, retryable, 0, op, onDone)
+}
+
+func (vm *viewModel) startStaggeredTask(title string, act action, targets []target, retryable bool, stagger time.Duration,
+	op func(ctx context.Context, t target) error, onDone func(t *task)) *task {
 	vm.nextTaskID++
+	ctx, cancel := context.WithCancel(context.Background())
 	t := &task{
 		id:        vm.nextTaskID,
 		title:     title,
 		act:       act,
+		cancel:    cancel,
 		started:   time.Now(),
 		retryable: retryable,
+		stagger:   stagger,
 		op:        op,
 		onDone:    onDone,
 	}
@@ -114,6 +137,9 @@ func (vm *viewModel) startTask(title string, act action, targets []target, retry
 		t.items = append(t.items, &taskItem{target: tg})
 		if tg.id != "" {
 			vm.busy[tg.id] = title
+			if vm.busyCancel != nil {
+				vm.busyCancel[tg.id] = cancel
+			}
 		}
 	}
 	vm.tasks = append(vm.tasks, t)
@@ -121,12 +147,37 @@ func (vm *viewModel) startTask(title string, act action, targets []target, retry
 		vm.tasks = vm.tasks[len(vm.tasks)-maxKeptTasks:]
 	}
 	vm.appendLog(fmt.Sprintf("[%s] 开始任务「%s」，共 %d 项", time.Now().Format("15:04:05"), title, len(t.items)))
-	go vm.runTask(t)
+	go vm.runTask(ctx, t)
 	return t
 }
 
-func (vm *viewModel) runTask(t *task) {
-	ctx := context.Background()
+func (vm *viewModel) cancelInstanceTask(instID string) {
+	if vm.busyCancel != nil {
+		if cancel, ok := vm.busyCancel[instID]; ok && cancel != nil {
+			cancel()
+			delete(vm.busyCancel, instID)
+		}
+	}
+	for i := len(vm.tasks) - 1; i >= 0; i-- {
+		tk := vm.tasks[i]
+		if tk.finished {
+			continue
+		}
+		for _, it := range tk.items {
+			if it.id == instID {
+				tk.canceled = true
+				break
+			}
+		}
+	}
+}
+
+func (vm *viewModel) runTask(ctx context.Context, t *task) {
+	defer func() {
+		if t.cancel != nil {
+			t.cancel()
+		}
+	}()
 	ch := make(chan *taskItem)
 	var wg sync.WaitGroup
 	for range min(taskWorkers, max(1, len(t.items))) {
@@ -134,25 +185,84 @@ func (vm *viewModel) runTask(t *task) {
 		go func() {
 			defer wg.Done()
 			for it := range ch {
+				if ctx.Err() != nil {
+					vm.post(func() {
+						it.status = itemFailed
+						it.err = "任务已取消"
+						if it.id != "" && vm.busy[it.id] == t.title {
+							delete(vm.busy, it.id)
+							if vm.busyCancel != nil {
+								delete(vm.busyCancel, it.id)
+							}
+						}
+					})
+					continue
+				}
 				vm.post(func() { it.status = itemRunning })
 				err := t.op(ctx, it.target)
 				vm.post(func() {
 					if err != nil {
+						redacted := config.RedactError(err)
 						it.status = itemFailed
-						it.err = oneLine(err.Error())
-						vm.appendLog(fmt.Sprintf("%s / %s 失败：%v", t.title, it.name, err))
+						it.err = oneLine(redacted)
+						vm.appendLog(fmt.Sprintf("%s / %s 失败：%s", t.title, it.name, redacted))
 					} else {
 						it.status = itemOK
 					}
 					if it.id != "" && vm.busy[it.id] == t.title {
 						delete(vm.busy, it.id)
+						if vm.busyCancel != nil {
+							delete(vm.busyCancel, it.id)
+						}
 					}
 				})
 			}
 		}()
 	}
-	for _, it := range t.items {
-		ch <- it
+	canceledAt := -1
+	for i, it := range t.items {
+		if ctx.Err() != nil {
+			canceledAt = i
+			break
+		}
+		if i > 0 && t.stagger > 0 {
+			timer := time.NewTimer(t.stagger)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				canceledAt = i
+			case <-timer.C:
+			}
+			if canceledAt >= 0 || ctx.Err() != nil {
+				canceledAt = i
+				break
+			}
+		}
+		select {
+		case ch <- it:
+		case <-ctx.Done():
+			canceledAt = i
+		}
+		if canceledAt >= 0 {
+			break
+		}
+	}
+	if canceledAt >= 0 {
+		rem := t.items[canceledAt:]
+		vm.post(func() {
+			for _, r := range rem {
+				if r.status == itemPending {
+					r.status = itemFailed
+					r.err = "任务已取消"
+				}
+				if r.id != "" && vm.busy[r.id] == t.title {
+					delete(vm.busy, r.id)
+					if vm.busyCancel != nil {
+						delete(vm.busyCancel, r.id)
+					}
+				}
+			}
+		})
 	}
 	close(ch)
 	wg.Wait()

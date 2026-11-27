@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+	"virdeck/config"
 	"virdeck/core/service"
 )
 
@@ -13,7 +14,6 @@ type action int
 const (
 	actStart action = iota
 	actStop
-	actClone
 	actScreen
 	actInstallAPK
 	actShell
@@ -29,8 +29,6 @@ func (a action) label() string {
 		return "启动"
 	case actStop:
 		return "停止"
-	case actClone:
-		return "克隆"
 	case actScreen:
 		return "投屏"
 	case actInstallAPK:
@@ -53,10 +51,15 @@ func (a action) label() string {
 // busyOp is the title of the task that currently holds inst ("" when idle);
 // an instance with a running task never accepts a conflicting operation.
 func checkAction(a action, inst service.Instance, busyOp string) (bool, string) {
-	if busyOp != "" {
-		return false, fmt.Sprintf("正在执行「%s」", busyOp)
-	}
 	st := inst.State
+	if busyOp != "" {
+		canInterrupt := a == actStop &&
+			(busyOp == "启动" || busyOp == "安装 APK" || busyOp == "安装应用") &&
+			(st == service.Running || st == service.Starting || (st == service.Failed && inst.Port > 0))
+		if !canInterrupt {
+			return false, fmt.Sprintf("正在执行「%s」", busyOp)
+		}
+	}
 	switch a {
 	case actStart:
 		if st == service.Failed && inst.Port > 0 {
@@ -72,11 +75,11 @@ func checkAction(a action, inst service.Instance, busyOp string) (bool, string) 
 		if st != service.Running && st != service.Starting && !(st == service.Failed && inst.Port > 0) {
 			return false, "未在运行"
 		}
-	case actClone:
-		if st == service.Running || st == service.Starting || inst.Port > 0 {
-			return false, "克隆前需先停止"
+	case actInstallAPK:
+		if st == service.Failed && inst.Port > 0 {
+			return false, "启动失败的进程尚未退出，请先停止"
 		}
-	case actScreen, actInstallAPK, actShell, actTransfer:
+	case actScreen, actShell, actTransfer:
 		switch st {
 		case service.Running:
 		case service.Starting:
@@ -152,10 +155,11 @@ func pendingRestart(inst service.Instance) bool {
 }
 
 func proxyText(p string) string {
-	if strings.TrimSpace(p) == "" {
+	redacted := config.RedactProxyURL(p)
+	if redacted == "" {
 		return "直连"
 	}
-	return p
+	return redacted
 }
 
 // proxyBreakdown groups selected instances by saved proxy, in first-seen order.

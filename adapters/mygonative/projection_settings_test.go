@@ -200,7 +200,11 @@ func TestBatchProjectionSettingsReachableForMixedStates(t *testing.T) {
 	vm.selected.Add(vm.instances[1].ID)
 	tester := ui.NewTester(vm.view, 1180, 780)
 	tester.Frame()
-	if err := tester.Click("投屏设置"); err != nil {
+	if err := tester.Click("配置"); err != nil {
+		t.Fatal(err)
+	}
+	tester.Frame()
+	if err := tester.ChooseMenuItem("投屏设置"); err != nil {
 		t.Fatal(err)
 	}
 	if !vm.projection.show {

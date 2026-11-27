@@ -157,6 +157,7 @@ func TestNewCatalogSeedsCompatibilityFavoritesWithVerifiedLegacyDownload(t *test
 		"system-images;android-25;google_apis_playstore;x86",
 		"system-images;android-28;google_apis_playstore;x86_64",
 		"system-images;android-30;google_apis_playstore;x86_64",
+		"system-images;android-34;google_apis_playstore;x86_64",
 	} {
 		item, ok := store.Get(id, nil)
 		if !ok || !item.Favorite || item.Note == "" {
@@ -237,4 +238,57 @@ func windowsStore(filePath, sdkRoot string) (*Store, error) {
 func windowsRecommended() []ImageItem {
 	d, _ := config.ForHost("windows", "amd64")
 	return recommended(d)
+}
+
+func TestLegacyVersion3CatalogAddsAndroid14WithoutClobberingNotes(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "catalog.json")
+	raw := `{"favoritesVersion":3,"favorites":{"system-images;android-30;google_apis_playstore;x86_64":{"note":"主用"},"system-images;android-28;google_apis_playstore;x86_64":{"note":"Pie 备注"}}}`
+	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s, err := windowsStore(path, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	api34, ok := s.Get("system-images;android-34;google_apis_playstore;x86_64", nil)
+	if !ok || !api34.Favorite || api34.Note == "" {
+		t.Fatalf("expected android-34 pinned favorite after v3->v4 migration, got %+v", api34)
+	}
+	if api25, _ := s.Get("system-images;android-25;google_apis_playstore;x86", nil); api25.Favorite {
+		t.Fatal("unfavorited android-25 from v3 catalog should stay unfavorited")
+	}
+	if got := s.data.Favorites["system-images;android-30;google_apis_playstore;x86_64"].Note; got != "主用" {
+		t.Fatalf("android-30 note overwritten: %q", got)
+	}
+	if got := s.data.Favorites["system-images;android-28;google_apis_playstore;x86_64"].Note; got != "Pie 备注" {
+		t.Fatalf("android-28 note overwritten: %q", got)
+	}
+}
+
+func TestSaveCustomAcceptsSHA256AndRejectsInvalidChecksum(t *testing.T) {
+	s, err := windowsStore(filepath.Join(t.TempDir(), "catalog.json"), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sum256 := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	id := "system-images;android-35;google_apis_playstore;x86_64"
+	if err := s.SaveCustom(ImageItem{
+		ID:   id,
+		Name: "Android 15 SHA256",
+		URL:  "https://example.com/a15.zip",
+		SHA1: sum256, // UI/caller may pass 64-char hex in SHA1 slot
+	}); err != nil {
+		t.Fatalf("SaveCustom SHA256 failed: %v", err)
+	}
+	got, ok := s.Get(id, nil)
+	if !ok || got.SHA256 != sum256 || got.SHA1 != "" || got.EffectiveChecksum() != sum256 {
+		t.Fatalf("unexpected normalized SHA256 custom item: %+v", got)
+	}
+	if err := s.SaveCustom(ImageItem{
+		ID:   "system-images;android-35;default;x86_64",
+		Name: "Bad Checksum",
+		SHA1: "12345",
+	}); err == nil {
+		t.Fatal("expected invalid checksum error, got nil")
+	}
 }

@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"unicode/utf8"
 	"unsafe"
 
 	"github.com/ebitengine/purego"
@@ -105,6 +106,12 @@ func macInit() error {
 	})
 	return mac.err
 }
+func cfRelease(v uintptr) {
+	if v != 0 {
+		mac.release(v)
+	}
+}
+
 func cfString(s string) uintptr { return mac.stringCreate(0, s, 0x08000100) }
 func cfText(v uintptr) string {
 	if v == 0 {
@@ -118,7 +125,10 @@ func cfText(v uintptr) string {
 }
 func cfDict(d uintptr, key string) uintptr {
 	k := cfString(key)
-	defer mac.release(k)
+	defer cfRelease(k)
+	if k == 0 {
+		return 0
+	}
 	return mac.dictionaryGet(d, k)
 }
 func cfInt(v uintptr) int64 {
@@ -193,7 +203,7 @@ func Windows() ([]Window, error) {
 	if list == 0 {
 		return nil, fmt.Errorf("CGWindowListCopyWindowInfo failed")
 	}
-	defer mac.release(list)
+	defer cfRelease(list)
 	var out []Window
 	for i, n := int64(0), mac.arrayCount(list); i < n; i++ {
 		d := mac.arrayAt(list, i)
@@ -218,11 +228,11 @@ func Windows() ([]Window, error) {
 		}
 		if title, err := axCopy(ax, "AXTitle"); err == nil {
 			w.Title = cfText(title)
-			mac.release(title)
+			cfRelease(title)
 		}
 		if minimized, e := axCopy(ax, "AXMinimized"); e == nil {
 			w.Minimized = mac.booleanGet(minimized)
-			mac.release(minimized)
+			cfRelease(minimized)
 		}
 		w.ClientWidth, w.ClientHeight = w.Bounds.Width, w.Bounds.Height
 		if content, err := axCopy(ax, "AXContents"); err == nil {
@@ -233,25 +243,34 @@ func Windows() ([]Window, error) {
 						w.ClientWidth = int(s.Width)
 						w.ClientHeight = int(s.Height)
 					}
-					mac.release(size)
+					cfRelease(size)
 				}
 			}
-			mac.release(content)
+			cfRelease(content)
 		}
-		mac.release(ax)
+		cfRelease(ax)
 		out = append(out, w)
 	}
 	return out, nil
 }
 func axCopy(element uintptr, name string) (uintptr, error) {
+	if element == 0 {
+		return 0, fmt.Errorf("%s: nil AX element", name)
+	}
 	if code := mac.axTimeout(element, 0.5); code != 0 {
 		return 0, fmt.Errorf("AX timeout setup: %d", code)
 	}
 	key := cfString(name)
-	defer mac.release(key)
+	defer cfRelease(key)
+	if key == 0 {
+		return 0, fmt.Errorf("%s: CFString allocation failed", name)
+	}
 	var value uintptr
 	if code := mac.axCopy(element, key, &value); code != 0 {
 		return 0, fmt.Errorf("%s: Accessibility error %d", name, code)
+	}
+	if value == 0 {
+		return 0, fmt.Errorf("%s: nil AX value", name)
 	}
 	return value, nil
 }
@@ -266,12 +285,12 @@ func macAXWindow(w Window) (uintptr, error) {
 	if app == 0 {
 		return 0, fmt.Errorf("AX application unavailable")
 	}
-	defer mac.release(app)
+	defer cfRelease(app)
 	windows, err := axCopy(app, "AXWindows")
 	if err != nil {
 		return 0, err
 	}
-	defer mac.release(windows)
+	defer cfRelease(windows)
 	var match uintptr
 	matches := 0
 	for i, n := int64(0), mac.arrayCount(windows); i < n; i++ {
@@ -282,7 +301,7 @@ func macAXWindow(w Window) (uintptr, error) {
 		}
 		var point cgPoint
 		ok := mac.axValueGet(p, 1, unsafe.Pointer(&point))
-		mac.release(p)
+		cfRelease(p)
 		if !ok {
 			continue
 		}
@@ -292,7 +311,7 @@ func macAXWindow(w Window) (uintptr, error) {
 		}
 		var size cgSize
 		ok = mac.axValueGet(s, 2, unsafe.Pointer(&size))
-		mac.release(s)
+		cfRelease(s)
 		if !ok {
 			continue
 		}
@@ -305,7 +324,7 @@ func macAXWindow(w Window) (uintptr, error) {
 				continue
 			}
 			title := cfText(v)
-			mac.release(v)
+			cfRelease(v)
 			if title != w.Title {
 				continue
 			}
@@ -330,7 +349,7 @@ func validatedAX(w Window) (uintptr, error) {
 	if list == 0 {
 		return 0, fmt.Errorf("无法验证投屏窗口")
 	}
-	defer mac.release(list)
+	defer cfRelease(list)
 	for i, n := int64(0), mac.arrayCount(list); i < n; i++ {
 		d := mac.arrayAt(list, i)
 		current := Window{Handle: uintptr(cfInt(cfDict(d, "kCGWindowNumber"))), PID: int(cfInt(cfDict(d, "kCGWindowOwnerPID")))}
@@ -352,11 +371,17 @@ func validatedAX(w Window) (uintptr, error) {
 	return 0, fmt.Errorf("投屏窗口已关闭或身份已变化")
 }
 func axSet(element uintptr, name string, value uintptr) error {
+	if element == 0 || value == 0 {
+		return fmt.Errorf("%s: nil AX element or value", name)
+	}
 	if code := mac.axTimeout(element, 0.5); code != 0 {
 		return fmt.Errorf("AX timeout setup: %d", code)
 	}
 	key := cfString(name)
-	defer mac.release(key)
+	defer cfRelease(key)
+	if key == 0 {
+		return fmt.Errorf("%s: CFString allocation failed", name)
+	}
 	if code := mac.axSet(element, key, value); code != 0 {
 		return fmt.Errorf("%s: Accessibility error %d（目标窗口可能不允许此操作）", name, code)
 	}
@@ -370,15 +395,18 @@ func Place(w Window, r Rect) error {
 	if err != nil {
 		return err
 	}
-	defer mac.release(a)
+	defer cfRelease(a)
 	if err = axSet(a, "AXMinimized", mac.cfFalse); err != nil {
 		return err
 	}
 	point, size := cgPoint{float64(r.X), float64(r.Y)}, cgSize{float64(r.Width), float64(r.Height)}
 	p := mac.axValueCreate(1, unsafe.Pointer(&point))
+	defer cfRelease(p)
 	s := mac.axValueCreate(2, unsafe.Pointer(&size))
-	defer mac.release(p)
-	defer mac.release(s)
+	defer cfRelease(s)
+	if p == 0 || s == 0 {
+		return fmt.Errorf("AXValueCreate failed")
+	}
 	if err = axSet(a, "AXSize", s); err != nil {
 		return err
 	}
@@ -389,36 +417,48 @@ func Activate(w Window) error {
 	if err != nil {
 		return err
 	}
-	defer mac.release(a)
+	defer cfRelease(a)
 	if err = axSet(a, "AXMinimized", mac.cfFalse); err != nil {
 		return err
 	}
 	app := mac.axApp(int32(w.PID))
-	defer mac.release(app)
+	if app == 0 {
+		return fmt.Errorf("AX application unavailable")
+	}
+	defer cfRelease(app)
 	if err = axSet(app, "AXFrontmost", mac.cfTrue); err != nil {
 		return err
 	}
 	return axPerform(a, "AXRaise")
 }
 func SetTitle(w Window, title string) error {
-	if strings.ContainsRune(title, 0) {
+	if !utf8.ValidString(title) || strings.ContainsRune(title, 0) {
 		return fmt.Errorf("invalid title")
 	}
 	a, err := validatedAX(w)
 	if err != nil {
 		return err
 	}
-	defer mac.release(a)
+	defer cfRelease(a)
 	value := cfString(title)
-	defer mac.release(value)
+	if value == 0 {
+		return fmt.Errorf("CFStringCreateWithCString failed")
+	}
+	defer cfRelease(value)
 	return axSet(a, "AXTitle", value)
 }
 func axPerform(a uintptr, action string) error {
+	if a == 0 {
+		return fmt.Errorf("%s: nil AX element", action)
+	}
 	if code := mac.axTimeout(a, 0.5); code != 0 {
 		return fmt.Errorf("AX timeout setup: %d", code)
 	}
 	key := cfString(action)
-	defer mac.release(key)
+	defer cfRelease(key)
+	if key == 0 {
+		return fmt.Errorf("%s: CFString allocation failed", action)
+	}
 	if code := mac.axAction(a, key); code != 0 {
 		return fmt.Errorf("%s: Accessibility error %d", action, code)
 	}

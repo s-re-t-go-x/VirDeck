@@ -1,37 +1,100 @@
 name: Cross-platform checks & Release
+
 on:
   workflow_dispatch:
     inputs:
       create_release:
         type: boolean
-        description: '是否发布 GitHub Release'
+        description: 'Whether to publish a GitHub Release'
         default: true
       tag_name:
         type: string
-        description: 'Release 标签名（如 v0.9.0 或 v0.9.0-beta，留空自动提取版本）'
+        description: 'Existing Gitea tag mirrored to GitHub (blank: use product version)'
         default: ''
       prerelease:
         type: boolean
-        description: '是否标记为预发布 (Pre-release)'
+        description: 'Mark as pre-release'
         default: true
       release_title:
         type: string
-        description: 'Release 标题（留空自动使用标签名）'
+        description: 'Release title (blank: use tag)'
         default: ''
 
 permissions:
   contents: read
 
 jobs:
+  prepare:
+    name: Resolve and verify tag
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.meta.outputs.tag }}
+      title: ${{ steps.meta.outputs.title }}
+      prerelease: ${{ steps.meta.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Resolve metadata
+        id: meta
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          CREATE_RELEASE: ${{ inputs.create_release }}
+          INPUT_TAG_NAME: ${{ inputs.tag_name }}
+          INPUT_PRERELEASE: ${{ inputs.prerelease }}
+          INPUT_RELEASE_TITLE: ${{ inputs.release_title }}
+        run: |
+          set -euo pipefail
+          TAG="$INPUT_TAG_NAME"
+          if [[ -z "$TAG" ]]; then
+            VERSION="$(jq -r '.version // empty' assets/product.json)"
+            if [[ -z "$VERSION" ]]; then
+              echo '::error::assets/product.json has no version'
+              exit 1
+            fi
+            VERSION="${VERSION#v}"
+            TAG="v${VERSION}"
+          fi
+          if [[ ! "$TAG" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
+            echo "::error::Invalid tag: $TAG"
+            exit 1
+          fi
+
+          TITLE="${INPUT_RELEASE_TITLE//$'\r'/}"
+          TITLE="${TITLE//$'\n'/ }"
+          if [[ -z "$TITLE" ]]; then TITLE="$TAG"; fi
+          PRERELEASE=false
+          if [[ "$INPUT_PRERELEASE" == 'true' ]]; then PRERELEASE=true; fi
+
+          if [[ "$CREATE_RELEASE" == 'true' ]]; then
+            if ! git ls-remote --exit-code --refs origin "refs/tags/$TAG" > /dev/null; then
+              echo "::error::GitHub tag '$TAG' not found. Create it in Gitea and wait for Push Mirror first."
+              exit 1
+            fi
+            if gh release view "$TAG" > /dev/null 2>&1; then
+              echo "::error::Release '$TAG' already exists; refusing to overwrite it."
+              exit 1
+            fi
+          fi
+
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "title=$TITLE" >> "$GITHUB_OUTPUT"
+          echo "prerelease=$PRERELEASE" >> "$GITHUB_OUTPUT"
+
   native:
+    needs: prepare
     strategy:
       fail-fast: false
       matrix:
         runner: [windows-latest, macos-latest, ubuntu-latest]
     runs-on: ${{ matrix.runner }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          # A release must build the exact commit pointed to by the mirrored tag.
+          ref: ${{ inputs.create_release && format('refs/tags/{0}', needs.prepare.outputs.tag) || github.ref }}
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version-file: go.mod
       - name: Linux desktop and font dependencies
@@ -46,71 +109,72 @@ jobs:
         if: runner.os != 'Linux'
         run: go test ./... -count=1 -timeout 5m
       - name: Build unsigned development binaries
+        if: runner.os != 'macOS'
         run: go run ./scripts/package
-      - uses: actions/upload-artifact@v4
+      - name: Build unsigned development binaries (macOS ARM64 & Intel)
+        if: runner.os == 'macOS'
+        run: |
+          go run ./scripts/package -os darwin -arch arm64
+          go run ./scripts/package -os darwin -arch amd64
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: VirDeck-${{ runner.os }}-${{ runner.arch }}
           path: |
             dist/VirDeck-*
             dist/virdeck-cli-*
+          if-no-files-found: error
 
   release:
     name: Publish Release
-    needs: native
+    needs: [prepare, native]
+    if: ${{ inputs.create_release && needs.native.result == 'success' }}
+    runs-on: ubuntu-latest
     permissions:
       contents: write
-    if: |
-      always() &&
-      needs.native.result == 'success' &&
-      inputs.create_release
-    runs-on: ubuntu-latest
+    concurrency:
+      group: release-${{ needs.prepare.outputs.tag }}
+      cancel-in-progress: false
     steps:
-      - uses: actions/checkout@v4
       - name: Download all built binaries
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           path: artifacts
-      - name: Prepare release assets and metadata
-        id: meta
+      - name: Prepare release assets
         shell: bash
-        env:
-          INPUT_TAG_NAME: ${{ inputs.tag_name }}
-          INPUT_PRERELEASE: ${{ inputs.prerelease }}
-          INPUT_RELEASE_TITLE: ${{ inputs.release_title }}
         run: |
+          set -euo pipefail
           mkdir -p release-assets
-          find artifacts -type f \( -name "VirDeck-*" -o -name "virdeck-cli-*" \) -exec cp {} release-assets/ \;
-          echo "=== Release Assets ==="
-          ls -lh release-assets
-
-          TAG="$INPUT_TAG_NAME"
-          if [ -z "$TAG" ]; then
-            VERSION=$(grep '"version"' assets/product.json | head -n 1 | awk -F '"' '{print $4}')
-            TAG="v${VERSION}"
-          fi
-          if [[ ! "$TAG" =~ ^[A-Za-z0-9._-]+$ ]]; then
-            echo "Invalid tag_name: $TAG" >&2
+          while IFS= read -r -d '' f; do
+            name="$(basename "$f")"
+            if [[ -e "release-assets/$name" ]]; then
+              echo "::error::Duplicate asset filename: $name"
+              exit 1
+            fi
+            cp "$f" "release-assets/$name"
+          done < <(find artifacts -type f \( -name 'VirDeck-*' -o -name 'virdeck-cli-*' \) -print0)
+          shopt -s nullglob
+          files=(release-assets/*)
+          if (( ${#files[@]} == 0 )); then
+            echo '::error::No release assets found'
             exit 1
           fi
-          PRERELEASE="$INPUT_PRERELEASE"
-          if [ "$PRERELEASE" != "true" ]; then
-            PRERELEASE="false"
+          ls -lh release-assets
+      - name: Publish only if Release does not exist
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ needs.prepare.outputs.tag }}
+          TITLE: ${{ needs.prepare.outputs.title }}
+          PRERELEASE: ${{ needs.prepare.outputs.prerelease }}
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            echo "::error::Release '$TAG' already exists (published or draft); refusing to modify it."
+            exit 1
           fi
-          TITLE="${INPUT_RELEASE_TITLE//$'\r'/}"
-          TITLE="${TITLE//$'\n'/ }"
-          if [ -z "$TITLE" ]; then
-            TITLE="$TAG"
+          args=(--verify-tag --title="$TITLE" --generate-notes)
+          if [[ "$PRERELEASE" == 'true' ]]; then
+            args+=(--prerelease)
           fi
-
-          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-          echo "title=$TITLE" >> "$GITHUB_OUTPUT"
-          echo "prerelease=$PRERELEASE" >> "$GITHUB_OUTPUT"
-      - name: Publish GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ steps.meta.outputs.tag }}
-          name: ${{ steps.meta.outputs.title }}
-          files: release-assets/*
-          draft: false
-          prerelease: ${{ steps.meta.outputs.prerelease == 'true' }}
-          generate_release_notes: true
+          gh release create "$TAG" release-assets/* "${args[@]}"

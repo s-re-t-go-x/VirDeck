@@ -2,8 +2,10 @@ package emu
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"io"
+	"net"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -23,32 +25,37 @@ var DefaultADBServerPort = config.Values.Runtime.ADBServerPort
 // EnvInfo reports discovered Android SDK/CLI tools, WHPX/AEHD hardware acceleration status,
 // path health, and locally installed system images.
 type EnvInfo struct {
-	DataDir        string
-	SDKRoot        string
-	AVDHome        string
-	AndroidHomeDir string
-	EmulatorPath   string
-	ADBPath        string
-	AVDManagerPath string
-	SDKManagerPath string
-	ScrcpyPath     string
-	AccelOK        bool
-	AccelMessage   string
-	PathASCIIOK    bool
-	PathWritableOK bool
-	PathWarning    string
-	SystemImages   []string
+	DataDir          string
+	EffectiveDataDir string
+	PathCompatMode   string
+	SDKRoot          string
+	AVDHome          string
+	AndroidHomeDir   string
+	EmulatorPath     string
+	ADBPath          string
+	AVDManagerPath   string
+	SDKManagerPath   string
+	ScrcpyPath       string
+	AccelOK          bool
+	AccelMessage     string
+	PathASCIIOK      bool
+	PathWritableOK   bool
+	PathWarning      string
+	SystemImages     []string
 }
 
 // LaunchOptions configures how an emulator instance process is started.
 type LaunchOptions struct {
-	AVDName    string
-	Port       int
-	MemoryMB   int
-	Cores      int
-	Proxy      string
-	Headless   bool
-	NoSnapshot bool
+	AVDName        string
+	Port           int
+	MemoryMB       int
+	Cores          int
+	Proxy          string
+	DNSServer      string
+	GPUMode        string
+	Headless       bool
+	NoSnapshot     bool
+	NoSnapshotLoad bool
 }
 
 // Process represents a running emulator OS process.
@@ -111,17 +118,19 @@ type Controller struct {
 	reservations    map[string]projectionReservation
 	screenMu        sync.Mutex
 	projections     map[string]*projectionProcess
-	screenHost      projectionHost
-	dataDir         string
-	sdkRoot         string
-	avdHome         string
-	androidHomeDir  string
-	scrcpyPath      string
-	adbServerPort   int
+	screenHost       projectionHost
+	dataDir          string
+	effectiveDataDir string
+	pathCompatMode   string
+	sdkRoot          string
+	avdHome          string
+	androidHomeDir   string
+	scrcpyPath       string
+	adbServerPort    int
 }
 
 // DefaultDataDir uses a portable VirDeckData directory, or the user's Application
-// Support directory for a macOS app bundle. VIRDECK_DATA_DIR overrides both.
+// Support directory for a macOS app bundle. VIRDECK_DATA_DIR or a saved pointer file overrides both.
 func DefaultDataDir() string {
 	home, _ := os.UserHomeDir()
 	base := exeBaseDir()
@@ -130,7 +139,12 @@ func DefaultDataDir() string {
 			base = wd
 		}
 	}
-	return defaultDataDirForHost(runtime.GOOS, base, home, os.Getenv("VIRDECK_DATA_DIR"))
+	override := strings.TrimSpace(os.Getenv("VIRDECK_DATA_DIR"))
+	if override == "" {
+		cfgDir, _ := os.UserConfigDir()
+		override = readDataDirOverride(base, cfgDir)
+	}
+	return defaultDataDirForHost(runtime.GOOS, base, home, override)
 }
 
 func defaultDataDirForHost(host, base, home, override string) string {
@@ -170,21 +184,39 @@ func NewControllerWithDataDir(dataDir, sdkRoot, avdHome string, adbServerPort in
 	if adbServerPort <= 0 {
 		adbServerPort = DefaultADBServerPort
 	}
+	effData, compatMode, _ := resolveWindowsASCIIPath(dataDir)
+	if strings.TrimSpace(effData) == "" {
+		effData = dataDir
+	}
+
 	c := &Controller{
-		dataDir:        dataDir,
-		sdkRoot:        strings.TrimSpace(sdkRoot),
-		avdHome:        strings.TrimSpace(avdHome),
-		androidHomeDir: filepath.Join(dataDir, ".android"),
-		adbServerPort:  adbServerPort,
+		dataDir:          dataDir,
+		effectiveDataDir: effData,
+		pathCompatMode:   compatMode,
+		sdkRoot:          strings.TrimSpace(sdkRoot),
+		avdHome:          strings.TrimSpace(avdHome),
+		androidHomeDir:   filepath.Join(effData, ".android"),
+		adbServerPort:    adbServerPort,
 	}
 	if c.sdkRoot == "" {
-		c.sdkRoot = discoverSDKRoot(dataDir)
+		c.sdkRoot = discoverSDKRoot(effData)
+	} else {
+		if effSDK, _, _ := resolveWindowsASCIIPath(c.sdkRoot); effSDK != "" {
+			c.sdkRoot = effSDK
+		}
 	}
 	if c.avdHome == "" {
-		c.avdHome = discoverAVDHome(dataDir)
+		c.avdHome = discoverAVDHome(effData)
+	} else {
+		if effAVD, _, _ := resolveWindowsASCIIPath(c.avdHome); effAVD != "" {
+			c.avdHome = effAVD
+		}
 	}
 	_ = os.MkdirAll(c.avdHome, 0o755)
 	_ = os.MkdirAll(c.androidHomeDir, 0o700)
+	if runtime.GOOS != "windows" {
+		_ = os.Chmod(c.androidHomeDir, 0o700)
+	}
 	_ = c.HealAVDIniPaths()
 	return c
 }
@@ -192,22 +224,33 @@ func NewControllerWithDataDir(dataDir, sdkRoot, avdHome string, adbServerPort in
 // DataDir returns the root VirDeckData directory.
 func (c *Controller) DataDir() string { return c.dataDir }
 
+// EffectiveDataDir returns the runtime pure-ASCII directory alias used on Windows when DataDir is non-ASCII.
+func (c *Controller) EffectiveDataDir() string {
+	if c.effectiveDataDir != "" {
+		return c.effectiveDataDir
+	}
+	return c.dataDir
+}
+
+// PathCompatMode returns PathCompatNone, PathCompatShortPath, PathCompatJunction, or PathCompatFailed.
+func (c *Controller) PathCompatMode() string { return c.pathCompatMode }
+
 // SDKRoot returns the active Android SDK root directory, or the managed VirDeckData/sdk directory if none exists yet.
 func (c *Controller) SDKRoot() string {
 	if c.sdkRoot != "" {
 		return c.sdkRoot
 	}
-	return filepath.Join(c.dataDir, "sdk")
+	return filepath.Join(c.EffectiveDataDir(), "sdk")
 }
 
-// ManagedSDKRoot always returns <VirDeckData>/sdk for downloading/installing components.
+// ManagedSDKRoot always returns <EffectiveDataDir>/sdk for downloading/installing components.
 func (c *Controller) ManagedSDKRoot() string {
-	return filepath.Join(c.dataDir, "sdk")
+	return filepath.Join(c.EffectiveDataDir(), "sdk")
 }
 
-// ManagedScrcpyDir returns <VirDeckData>/scrcpy for downloading/installing scrcpy.
+// ManagedScrcpyDir returns <EffectiveDataDir>/scrcpy for downloading/installing scrcpy.
 func (c *Controller) ManagedScrcpyDir() string {
-	return filepath.Join(c.dataDir, "scrcpy")
+	return filepath.Join(c.EffectiveDataDir(), "scrcpy")
 }
 
 // AVDHome returns the active AVD directory.
@@ -216,23 +259,29 @@ func (c *Controller) AVDHome() string { return c.avdHome }
 // SetPaths updates the SDK root, AVD home, and optional custom scrcpy path at runtime.
 func (c *Controller) SetPaths(sdkRoot, avdHome, scrcpyPath string) {
 	if s := strings.TrimSpace(sdkRoot); s != "" {
+		if eff, _, _ := resolveWindowsASCIIPath(s); eff != "" {
+			s = eff
+		}
 		c.sdkRoot = s
 	} else {
-		c.sdkRoot = discoverSDKRoot(c.dataDir)
+		c.sdkRoot = discoverSDKRoot(c.EffectiveDataDir())
 	}
 	if a := strings.TrimSpace(avdHome); a != "" {
+		if eff, _, _ := resolveWindowsASCIIPath(a); eff != "" {
+			a = eff
+		}
 		c.avdHome = a
 	} else {
-		c.avdHome = discoverAVDHome(c.dataDir)
+		c.avdHome = discoverAVDHome(c.EffectiveDataDir())
 	}
 	c.scrcpyPath = strings.TrimSpace(scrcpyPath)
 }
 
 // RefreshPaths re-evaluates SDKroot after a component download completes.
 func (c *Controller) RefreshPaths() {
-	managed := filepath.Join(c.dataDir, "sdk")
+	managed := filepath.Join(c.EffectiveDataDir(), "sdk")
 	if hasSDKContent(managed) || c.sdkRoot == "" {
-		c.sdkRoot = discoverSDKRoot(c.dataDir)
+		c.sdkRoot = discoverSDKRoot(c.EffectiveDataDir())
 	}
 }
 
@@ -442,7 +491,10 @@ func (c *Controller) ResolvePaths() (emulatorBin, adbBin, avdMgrBin, sdkMgrBin, 
 	if scrcpyBin == "" {
 		base := exeBaseDir()
 		candidates := []string{}
-		if c.dataDir != "" {
+		if eff := c.EffectiveDataDir(); eff != "" {
+			candidates = append(candidates, filepath.Join(eff, "scrcpy", exeName("scrcpy")))
+		}
+		if c.dataDir != "" && c.dataDir != c.EffectiveDataDir() {
 			candidates = append(candidates, filepath.Join(c.dataDir, "scrcpy", exeName("scrcpy")))
 		}
 		candidates = append(candidates,
@@ -474,7 +526,10 @@ func (c *Controller) candidateSDKRoots() []string {
 			roots = append(roots, p)
 		}
 	}
-	if c.dataDir != "" {
+	if eff := c.EffectiveDataDir(); eff != "" {
+		add(filepath.Join(eff, "sdk"))
+	}
+	if c.dataDir != "" && c.dataDir != c.EffectiveDataDir() {
 		add(filepath.Join(c.dataDir, "sdk"))
 	}
 	add(c.sdkRoot)
@@ -531,22 +586,24 @@ func (c *Controller) InspectEnv(ctx context.Context) EnvInfo {
 	_ = c.HealAVDIniPaths()
 
 	emuBin, adbBin, avdMgrBin, sdkMgrBin, scrcpyBin := c.ResolvePaths()
-	asciiOK, writableOK, pathWarn := ValidateDataDir(c.dataDir)
+	asciiOK, writableOK, pathWarn := validateEffectiveDataDir(c.dataDir, c.EffectiveDataDir(), c.pathCompatMode, runtime.GOOS)
 
 	status := EnvInfo{
-		DataDir:        c.dataDir,
-		SDKRoot:        c.SDKRoot(),
-		AVDHome:        c.avdHome,
-		AndroidHomeDir: c.androidHomeDir,
-		EmulatorPath:   emuBin,
-		ADBPath:        adbBin,
-		AVDManagerPath: avdMgrBin,
-		SDKManagerPath: sdkMgrBin,
-		ScrcpyPath:     scrcpyBin,
-		PathASCIIOK:    asciiOK,
-		PathWritableOK: writableOK,
-		PathWarning:    pathWarn,
-		SystemImages:   c.ListSystemImages(),
+		DataDir:          c.dataDir,
+		EffectiveDataDir: c.EffectiveDataDir(),
+		PathCompatMode:   c.pathCompatMode,
+		SDKRoot:          c.SDKRoot(),
+		AVDHome:          c.avdHome,
+		AndroidHomeDir:   c.androidHomeDir,
+		EmulatorPath:     emuBin,
+		ADBPath:          adbBin,
+		AVDManagerPath:   avdMgrBin,
+		SDKManagerPath:   sdkMgrBin,
+		ScrcpyPath:       scrcpyBin,
+		PathASCIIOK:      asciiOK,
+		PathWritableOK:   writableOK,
+		PathWarning:      pathWarn,
+		SystemImages:     c.ListSystemImages(),
 	}
 
 	// Give actionable host diagnostics before invoking the emulator, including
@@ -678,138 +735,37 @@ func (c *Controller) CreateAVD(ctx context.Context, name, systemImage string, me
 	return c.CreateAVDWithSpec(ctx, name, systemImage, memoryMB, cores, "720p")
 }
 
-// CreateAVDWithSpec creates a clean AVD in pure Go with the specified resolution ("720p" or "1080p").
+// CreateAVDWithSpec creates a clean AVD in pure Go with the specified resolution ("720p", "1080p", "tablet", or custom).
 // Searches all candidate SDK roots to find where the requested system image is installed.
 func (c *Controller) CreateAVDWithSpec(ctx context.Context, name, systemImage string, memoryMB, cores int, resolution string) error {
+	return c.CreateAVDWithOptions(ctx, name, systemImage, CreateAVDOptions{
+		MemoryMB:   memoryMB,
+		Cores:      cores,
+		Resolution: resolution,
+	})
+}
+
+// CreateAVDWithOptions creates a clean AVD in pure Go with full hardware, screen, storage, and quick-boot options.
+func (c *Controller) CreateAVDWithOptions(ctx context.Context, name, systemImage string, opts CreateAVDOptions) error {
 	if strings.TrimSpace(systemImage) == "" {
 		return fmt.Errorf("必须指定系统镜像包路径（例如 system-images;android-34;google_apis_playstore;x86_64）")
 	}
-	parts := strings.Split(strings.TrimSpace(systemImage), ";")
-	if len(parts) != 4 || parts[0] != "system-images" {
+	apiFolder, tagDir, abi, ok := splitSystemImageID(systemImage)
+	if !ok {
 		return fmt.Errorf("系统镜像包格式无效 (%s)，应为 system-images;android-<API>;<tag>;<abi>", systemImage)
 	}
 	for _, root := range c.candidateSDKRoots() {
-		sysImgDir := filepath.Join(root, "system-images", parts[1], parts[2], parts[3])
+		sysImgDir := filepath.Join(root, "system-images", apiFolder, tagDir, abi)
 		if isValidSystemImageDir(sysImgDir) {
-			orig := c.sdkRoot
-			c.sdkRoot = root
-			err := c.CreateAVDNative(name, systemImage, memoryMB, cores, resolution)
-			c.sdkRoot = orig
-			return err
+			return c.createAVDNativeWithSDKRoot(root, name, systemImage, opts)
 		}
 	}
 	return fmt.Errorf("系统镜像 %s 尚未安装或缺少内核文件 (kernel-ranchu)，请先在「镜像与环境 -> 系统镜像」中下载安装", systemImage)
 }
 
-// CloneAVD copies a stopped AVD directory and rewrites its .ini and config.ini files,
-// omitting snapshots, lock files, and qcow2 overlays so the clone boots cleanly.
-func (c *Controller) CloneAVD(srcName, dstName string) error {
-	if c.avdHome == "" {
-		return fmt.Errorf("未知的 AVD 目录 (ANDROID_AVD_HOME)")
-	}
-	if !isSafePathSegment(srcName) || !isSafePathSegment(dstName) {
-		return fmt.Errorf("无效的 AVD 名称")
-	}
-	srcDir := filepath.Join(c.avdHome, srcName+".avd")
-	dstDir := filepath.Join(c.avdHome, dstName+".avd")
-	if !dirExists(srcDir) {
-		return fmt.Errorf("源 AVD 目录不存在: %s", srcDir)
-	}
-	if dirExists(dstDir) {
-		return fmt.Errorf("目标 AVD 目录已存在: %s", dstDir)
-	}
-
-	if err := copyAVDDirClean(srcDir, dstDir); err != nil {
-		_ = os.RemoveAll(dstDir)
-		return fmt.Errorf("复制 AVD 目录失败: %w", err)
-	}
-
-	// Rewrite config.ini references from srcName to dstName.
-	cfgPath := filepath.Join(dstDir, "config.ini")
-	if data, err := os.ReadFile(cfgPath); err == nil {
-		text := string(data)
-		text = strings.ReplaceAll(text, srcDir, dstDir)
-		text = strings.ReplaceAll(text, filepath.ToSlash(srcDir), filepath.ToSlash(dstDir))
-		lines := strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n")
-		for i, line := range lines {
-			k, _, ok := strings.Cut(line, "=")
-			if !ok {
-				continue
-			}
-			switch strings.TrimSpace(k) {
-			case "AvdId":
-				lines[i] = "AvdId=" + dstName
-			case "avd.ini.displayname":
-				lines[i] = "avd.ini.displayname=" + dstName
-			}
-		}
-		_ = os.WriteFile(cfgPath, []byte(strings.Join(lines, "\n")), 0o644)
-	}
-
-	// Write <dstName>.ini descriptor file.
-	iniPath := filepath.Join(c.avdHome, dstName+".ini")
-	iniContent := fmt.Sprintf("avd.ini.encoding=UTF-8\npath=%s\npath.rel=%s\ntarget=android-34\n", dstDir, filepath.Join("avd", dstName+".avd"))
-	if srcIni, err := os.ReadFile(filepath.Join(c.avdHome, srcName+".ini")); err == nil {
-		s := string(srcIni)
-		s = strings.ReplaceAll(s, srcDir, dstDir)
-		s = strings.ReplaceAll(s, srcName+".avd", dstName+".avd")
-		iniContent = s
-	}
-	return os.WriteFile(iniPath, []byte(iniContent), 0o644)
-}
-
 func dirExists(path string) bool {
 	info, err := os.Stat(path)
 	return err == nil && info.IsDir()
-}
-
-func copyAVDDirClean(srcDir, dstDir string) error {
-	return filepath.WalkDir(srcDir, func(path string, d os.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		rel, err := filepath.Rel(srcDir, path)
-		if err != nil {
-			return err
-		}
-		if rel == "." {
-			return os.MkdirAll(dstDir, 0o755)
-		}
-		name := d.Name()
-		// Skip snapshots directory, locks, generated hardware-qemu.ini, and qcow2 overlays
-		// (qcow2 headers contain hardcoded backing file paths to the source AVD).
-		if d.IsDir() && strings.EqualFold(name, "snapshots") {
-			return filepath.SkipDir
-		}
-		if strings.HasSuffix(name, ".lock") ||
-			strings.HasSuffix(name, ".qcow2") ||
-			strings.EqualFold(name, "hardware-qemu.ini") ||
-			strings.EqualFold(name, "multiinstance.lock") {
-			return nil
-		}
-		targetPath := filepath.Join(dstDir, rel)
-		if d.IsDir() {
-			return os.MkdirAll(targetPath, 0o755)
-		}
-		return copyFile(path, targetPath)
-	})
-}
-
-func copyFile(src, dst string) error {
-	in, err := os.Open(src)
-	if err != nil {
-		return err
-	}
-	defer in.Close()
-
-	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
-	if err != nil {
-		return err
-	}
-	defer out.Close()
-
-	_, err = io.Copy(out, in)
-	return err
 }
 
 // DeleteAVD deletes the AVD directory and .ini file directly in pure Go.
@@ -826,6 +782,9 @@ func (c *Controller) DeleteAVD(ctx context.Context, name string) error {
 
 // sdkRootForAVD reads <avdHome>/<avdName>.avd/config.ini's image.sysdir.1 and returns the SDK root that actually contains that system image.
 func (c *Controller) sdkRootForAVD(avdName string) string {
+	if !isSafePathSegment(avdName) {
+		return c.SDKRoot()
+	}
 	cfgPath := filepath.Join(c.avdHome, avdName+".avd", "config.ini")
 	props := readKeyValueFile(cfgPath)
 	relSysDir := strings.TrimSpace(props["image.sysdir.1"])
@@ -840,8 +799,87 @@ func (c *Controller) sdkRootForAVD(avdName string) string {
 	return c.SDKRoot()
 }
 
+func validateLaunchOptions(opts LaunchOptions) error {
+	if !isSafePathSegment(opts.AVDName) {
+		return fmt.Errorf("无效的 AVD 名称: %q", opts.AVDName)
+	}
+	if opts.Port < 0 || opts.Port > 65535 {
+		return fmt.Errorf("无效的实例端口: %d", opts.Port)
+	}
+	switch strings.TrimSpace(opts.GPUMode) {
+	case "", "auto", "host", "swiftshader_indirect", "swiftshader", "angle_indirect", "guest", "off":
+	default:
+		return fmt.Errorf("不支持的 GPU 渲染模式: %q", opts.GPUMode)
+	}
+	if proxy := strings.TrimSpace(opts.Proxy); proxy != "" {
+		if strings.HasPrefix(proxy, "-") {
+			return errors.New("代理地址不能以 - 开头")
+		}
+		for _, r := range proxy {
+			if r < 0x20 || r == 0x7f {
+				return errors.New("代理地址包含非法控制字符")
+			}
+		}
+		u, err := url.Parse(proxy)
+		scheme := ""
+		if u != nil {
+			scheme = strings.ToLower(u.Scheme)
+		}
+		if err != nil || u.Host == "" || (scheme != "http" && scheme != "https") {
+			return fmt.Errorf("无效的模拟器 HTTP 代理地址: %s", config.RedactProxyURL(proxy))
+		}
+	}
+	if dns := strings.TrimSpace(opts.DNSServer); dns != "" {
+		if strings.HasPrefix(dns, "-") {
+			return errors.New("DNS 地址不能以 - 开头")
+		}
+		for _, part := range strings.Split(dns, ",") {
+			if net.ParseIP(strings.TrimSpace(part)) == nil {
+				return fmt.Errorf("无效的 DNS IP 地址: %q", part)
+			}
+		}
+	}
+	return nil
+}
+
+func buildStartArgs(opts LaunchOptions) []string {
+	args := []string{
+		"-avd", opts.AVDName,
+		"-port", strconv.Itoa(opts.Port),
+		"-no-audio",
+		"-no-boot-anim",
+	}
+	if opts.NoSnapshot {
+		args = append(args, "-no-snapshot")
+	} else if opts.NoSnapshotLoad {
+		args = append(args, "-no-snapshot-load")
+	}
+	if opts.Headless {
+		args = append(args, "-no-window")
+	}
+	if opts.MemoryMB > 0 {
+		args = append(args, "-memory", strconv.Itoa(opts.MemoryMB))
+	}
+	if opts.Cores > 0 {
+		args = append(args, "-cores", strconv.Itoa(opts.Cores))
+	}
+	if gpu := strings.TrimSpace(opts.GPUMode); gpu != "" {
+		args = append(args, "-gpu", gpu)
+	}
+	if proxy := strings.TrimSpace(opts.Proxy); proxy != "" {
+		args = append(args, "-http-proxy", proxy)
+	}
+	if dns := strings.TrimSpace(opts.DNSServer); dns != "" {
+		args = append(args, "-dns-server", dns)
+	}
+	return args
+}
+
 // StartProcess launches the Android Emulator for the given LaunchOptions with isolated environment variables.
 func (c *Controller) StartProcess(opts LaunchOptions) (*Process, error) {
+	if err := validateLaunchOptions(opts); err != nil {
+		return nil, err
+	}
 	_ = c.HealAVDIniPaths()
 
 	emuBin, _, _, _, _ := c.ResolvePaths()
@@ -860,25 +898,7 @@ func (c *Controller) StartProcess(opts LaunchOptions) (*Process, error) {
 		}
 	}
 
-	args := []string{
-		"-avd", opts.AVDName,
-		"-port", strconv.Itoa(opts.Port),
-		"-no-audio",
-		"-no-boot-anim",
-		"-no-snapshot",
-	}
-	if opts.Headless {
-		args = append(args, "-no-window")
-	}
-	if opts.MemoryMB > 0 {
-		args = append(args, "-memory", strconv.Itoa(opts.MemoryMB))
-	}
-	if opts.Cores > 0 {
-		args = append(args, "-cores", strconv.Itoa(opts.Cores))
-	}
-	if proxy := strings.TrimSpace(opts.Proxy); proxy != "" {
-		args = append(args, "-http-proxy", proxy, "-dns-server", "8.8.8.8,1.1.1.1")
-	}
+	args := buildStartArgs(opts)
 
 	cmd := exec.Command(emuBin, args...)
 	// Helpers may inherit stdout/stderr after the emulator exits. Bound pipe draining

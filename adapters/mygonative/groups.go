@@ -3,8 +3,10 @@ package mygonative
 import (
 	"context"
 	"fmt"
-	"github.com/egoist/mygo/ui"
 	"strings"
+
+	"github.com/egoist/mygo/ui"
+	"virdeck/config"
 	"virdeck/core/service"
 )
 
@@ -304,6 +306,119 @@ func (vm *viewModel) buildGroupsModal(c *ui.Context) {
 				ui.Spacer(c)
 				if ui.Button(c.Key("groups_close"), "关闭").Clicked() {
 					s.show = false
+				}
+			})
+		})
+	})
+}
+
+func (vm *viewModel) groupMembers(groupID string) []service.Instance {
+	var out []service.Instance
+	for _, inst := range vm.instances {
+		if vm.groups.snapshot.Memberships[inst.ID] == groupID {
+			out = append(out, inst)
+		}
+	}
+	return out
+}
+
+func (vm *viewModel) startGroup(groupID, groupName string) {
+	if groupName == "" {
+		groupName = vm.instanceGroupNameByID(groupID)
+	}
+	members := vm.groupMembers(groupID)
+	eligible := planAction(actStart, members, vm.busy).eligible
+	if len(eligible) == 0 {
+		vm.showToast(fmt.Sprintf("分组「%s」没有可启动的已停止实例", groupName))
+		return
+	}
+
+	active := 0
+	for _, inst := range vm.instances {
+		if inst.State == service.Running || inst.State == service.Starting {
+			active++
+		}
+	}
+	maxConc := vm.svc.GetSettings().MaxConcurrent
+	if maxConc <= 0 {
+		maxConc = config.Values.Runtime.MaxConcurrent
+	}
+	avail := maxConc - active
+	if avail <= 0 {
+		vm.showToast(fmt.Sprintf("当前已有 %d/%d 台运行中，已达并发上限，请先停止部分实例再启动分组「%s」", active, maxConc, groupName))
+		return
+	}
+	if len(eligible) > avail {
+		vm.groupStartName = groupName
+		vm.groupStartTargets = eligible
+		vm.groupStartAvailable = avail
+		vm.groupStartMax = maxConc
+		vm.groupStartActive = active
+		vm.showGroupStartConfirm = true
+		return
+	}
+	vm.launchStaggeredGroupStart(groupName, eligible)
+}
+
+func (vm *viewModel) launchStaggeredGroupStart(groupName string, targets []service.Instance) {
+	if len(targets) == 0 {
+		return
+	}
+	vm.startStaggeredTask("启动分组 "+groupName, actStart, targetsOf(targets), true, groupStartStagger,
+		func(ctx context.Context, t target) error { return vm.svc.Start(ctx, t.id) }, nil)
+}
+
+func (vm *viewModel) stopGroup(groupID, groupName string) {
+	if groupName == "" {
+		groupName = vm.instanceGroupNameByID(groupID)
+	}
+	members := vm.groupMembers(groupID)
+	eligible := planAction(actStop, members, vm.busy).eligible
+	if len(eligible) == 0 {
+		vm.showToast(fmt.Sprintf("分组「%s」没有可停止的运行中实例", groupName))
+		return
+	}
+	for _, inst := range eligible {
+		vm.cancelInstanceTask(inst.ID)
+	}
+	vm.startTask("停止分组 "+groupName, actStop, targetsOf(eligible), true,
+		func(ctx context.Context, t target) error { return vm.svc.Stop(ctx, t.id) }, nil)
+}
+
+func (vm *viewModel) instanceGroupNameByID(groupID string) string {
+	for _, g := range vm.groups.snapshot.Groups {
+		if g.ID == groupID {
+			return g.Name
+		}
+	}
+	return "未分组"
+}
+
+func (vm *viewModel) buildGroupStartConfirmModal(c *ui.Context) {
+	ui.Modal(c, &vm.showGroupStartConfirm, func() {
+		t := c.Theme()
+		modalContent(c, 440).Gap(12).Children(func() {
+			ui.Row(c).Gap(8).AlignItems(ui.Center).Children(func() {
+				glyph(c, "alert", 18).TextColor(t.Warning)
+				ui.Textf(c, "分组「%s」超出并发余量", vm.groupStartName).FontSize(17).Bold()
+			})
+			ui.Textf(c, "该分组有 %d 台可启动实例，但当前已有 %d/%d 台运行中，仅剩 %d 个并发空位。",
+				len(vm.groupStartTargets), vm.groupStartActive, vm.groupStartMax, vm.groupStartAvailable).
+				FontSize(12).TextColor(t.Text)
+			ui.Text(c, "为避免宿主机 CPU/磁盘过载，可按 1.5s 间隔错峰启动前 N 台，或取消后先调整并发上限。").
+				FontSize(11).TextColor(t.TextMuted)
+			ui.Row(c).Gap(8).Children(func() {
+				ui.Spacer(c)
+				if ui.Button(c.Key("grp_start_cancel"), "取消").Clicked() {
+					vm.showGroupStartConfirm = false
+				}
+				capCount := min(vm.groupStartAvailable, len(vm.groupStartTargets))
+				label := fmt.Sprintf("仅启动前 %d 台（错峰）", capCount)
+				if ui.PrimaryButton(c.Key("grp_start_confirm"), label).Disabled(capCount <= 0).Clicked() {
+					capped := append([]service.Instance(nil), vm.groupStartTargets[:capCount]...)
+					gname := vm.groupStartName
+					vm.showGroupStartConfirm = false
+					vm.launchStaggeredGroupStart(gname, capped)
 				}
 			})
 		})

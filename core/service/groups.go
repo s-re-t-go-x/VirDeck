@@ -59,17 +59,7 @@ func (m *Manager) writeGroups(data GroupSnapshot) error {
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
-		return err
-	}
-	if err := os.WriteFile(path+".tmp", raw, 0644); err != nil {
-		return err
-	}
-	if err := os.Rename(path+".tmp", path); err != nil {
-		_ = os.Remove(path + ".tmp")
-		return err
-	}
-	return nil
+	return writeFileAtomic(path, raw, 0o700, 0o600)
 }
 func (m *Manager) ListGroups(ctx context.Context) (GroupSnapshot, error) {
 	if err := ctx.Err(); err != nil {

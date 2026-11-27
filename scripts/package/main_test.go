@@ -2,9 +2,12 @@ package main
 
 import (
 	"archive/zip"
+	"bytes"
 	"os"
 	"path/filepath"
 	"testing"
+	"unicode/utf16"
+	"virdeck/assets"
 )
 
 func TestArtifactNamingConvention(t *testing.T) {
@@ -69,5 +72,26 @@ func TestArchiveContainsOnlyExplicitFilesWithExecutableModes(t *testing.T) {
 	defer z.Close()
 	if len(z.File) != 1 || z.File[0].Name != "bundle/VirDeck.app/Contents/MacOS/VirDeck" || z.File[0].Mode().Perm() != 0755 {
 		t.Fatalf("incorrect package contents or execute bits: %+v", z.File)
+	}
+}
+
+func TestWindowsSysoMatchesProductVersion(t *testing.T) {
+	u16 := utf16.Encode([]rune(assets.Product.Version))
+	needle := make([]byte, len(u16)*2)
+	for i, v := range u16 {
+		needle[2*i] = byte(v)
+		needle[2*i+1] = byte(v >> 8)
+	}
+	for _, rel := range []string{
+		filepath.Join("..", "..", "cmd", "app", "icon_windows_amd64.syso"),
+		filepath.Join("..", "..", "cmd", "cli", "icon_windows_amd64.syso"),
+	} {
+		data, err := os.ReadFile(rel)
+		if err != nil {
+			t.Fatalf("read %s: %v", rel, err)
+		}
+		if !bytes.Contains(data, needle) {
+			t.Fatalf("%s does not embed current ProductVersion %q", rel, assets.Product.Version)
+		}
 	}
 }

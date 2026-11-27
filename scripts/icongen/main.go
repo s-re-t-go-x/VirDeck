@@ -125,10 +125,7 @@ func generateWindowsResources(root string) {
 		must(os.WriteFile(config, data, 0600))
 
 		var cmd *exec.Cmd
-		localWinres := filepath.Join(root, "scripts", "icongen", "go-winres.exe")
-		if _, err := os.Stat(localWinres); err == nil {
-			cmd = exec.Command(localWinres, "make", "--in", config, "--arch", "amd64", "--out", filepath.Join(root, "cmd", target.pkg, "icon"))
-		} else if path, err := exec.LookPath("go-winres"); err == nil {
+		if path, err := exec.LookPath("go-winres"); err == nil {
 			cmd = exec.Command(path, "make", "--in", config, "--arch", "amd64", "--out", filepath.Join(root, "cmd", target.pkg, "icon"))
 		} else {
 			cmd = exec.Command("go", "run", "github.com/tc-hib/go-winres@v0.3.3", "make", "--in", config, "--arch", "amd64", "--out", filepath.Join(root, "cmd", target.pkg, "icon"))

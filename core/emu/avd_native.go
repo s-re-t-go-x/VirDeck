@@ -12,30 +12,90 @@ import (
 	"virdeck/config"
 )
 
-// ResolutionPreset defines a screen resolution and density preset for an AVD.
+// ResolutionPreset defines a screen resolution, density, and orientation preset for an AVD.
 type ResolutionPreset struct {
-	Width   int
-	Height  int
-	Density int
+	Width       int
+	Height      int
+	Density     int
+	Orientation string
 }
 
-// LookupResolution returns the width, height, and DPI for "720p" (default, low-memory) or "1080p".
-func LookupResolution(preset string) ResolutionPreset {
-	switch strings.ToLower(strings.TrimSpace(preset)) {
+// CreateAVDOptions configures hardware, screen form factor, storage size, and boot mode for pure-Go AVD creation.
+type CreateAVDOptions struct {
+	MemoryMB   int
+	Cores      int
+	Resolution string
+	StorageGB  int
+	QuickBoot  bool
+}
+
+// ParseResolution parses "720p", "1080p", "tablet"/"tablet_landscape", or custom "<W>x<H>" / "<W>x<H>@<DPI>".
+func ParseResolution(spec string) (ResolutionPreset, error) {
+	s := strings.ToLower(strings.TrimSpace(spec))
+	switch s {
+	case "", "720p", "720x1280":
+		return ResolutionPreset{Width: 720, Height: 1280, Density: 320, Orientation: "portrait"}, nil
 	case "1080p", "1080x1920", "fhd":
-		return ResolutionPreset{Width: 1080, Height: 1920, Density: 420}
-	default:
-		return ResolutionPreset{Width: 720, Height: 1280, Density: 320}
+		return ResolutionPreset{Width: 1080, Height: 1920, Density: 420, Orientation: "portrait"}, nil
+	case "tablet", "tablet_landscape", "1280x800":
+		return ResolutionPreset{Width: 1280, Height: 800, Density: 213, Orientation: "landscape"}, nil
 	}
+
+	dimPart := s
+	dpi := 320
+	if left, right, hasDPI := strings.Cut(s, "@"); hasDPI {
+		dimPart = strings.TrimSpace(left)
+		parsedDPI, err := strconv.Atoi(strings.TrimSpace(right))
+		if err != nil || parsedDPI < 120 || parsedDPI > 640 {
+			return ResolutionPreset{}, fmt.Errorf("无效的 DPI %q（需在 120–640 之间）", right)
+		}
+		dpi = parsedDPI
+	}
+	wStr, hStr, ok := strings.Cut(dimPart, "x")
+	if !ok {
+		return ResolutionPreset{}, fmt.Errorf("无效的分辨率格式 %q（支持 720p、1080p、tablet 或 宽x高@DPI）", spec)
+	}
+	w, errW := strconv.Atoi(strings.TrimSpace(wStr))
+	h, errH := strconv.Atoi(strings.TrimSpace(hStr))
+	if errW != nil || errH != nil || w < 320 || w > 4096 || h < 320 || h > 4096 {
+		return ResolutionPreset{}, fmt.Errorf("分辨率宽高需在 320–4096 像素之间: %q", spec)
+	}
+	orient := "portrait"
+	if w > h {
+		orient = "landscape"
+	}
+	return ResolutionPreset{Width: w, Height: h, Density: dpi, Orientation: orient}, nil
+}
+
+// LookupResolution returns the width, height, DPI, and orientation for preset (falling back to 720p).
+func LookupResolution(preset string) ResolutionPreset {
+	res, err := ParseResolution(preset)
+	if err != nil {
+		return ResolutionPreset{Width: 720, Height: 1280, Density: 320, Orientation: "portrait"}
+	}
+	return res
 }
 
 // CreateAVDNative creates a clean AVD instance directly in pure Go (without avdmanager.bat or JDK/Java)
 // by generating <avdHome>/<name>.ini and <avdHome>/<name>.avd/config.ini, plus ensuring package.xml exists.
 func (c *Controller) CreateAVDNative(name, systemImage string, memoryMB, cores int, resolution string) error {
+	return c.CreateAVDNativeWithOptions(name, systemImage, CreateAVDOptions{
+		MemoryMB:   memoryMB,
+		Cores:      cores,
+		Resolution: resolution,
+	})
+}
+
+// CreateAVDNativeWithOptions creates a clean AVD instance in pure Go with storage size and quick-boot options.
+func (c *Controller) CreateAVDNativeWithOptions(name, systemImage string, opts CreateAVDOptions) error {
+	return c.createAVDNativeWithSDKRoot(c.sdkRoot, name, systemImage, opts)
+}
+
+func (c *Controller) createAVDNativeWithSDKRoot(sdkRoot, name, systemImage string, opts CreateAVDOptions) error {
 	if c.avdHome == "" {
 		return fmt.Errorf("未配置 AVD 存储目录 (ANDROID_AVD_HOME)")
 	}
-	if c.sdkRoot == "" {
+	if sdkRoot == "" {
 		return fmt.Errorf("未配置 Android SDK 根目录 (ANDROID_SDK_ROOT)")
 	}
 	if !isSafePathSegment(name) {
@@ -46,13 +106,13 @@ func (c *Controller) CreateAVDNative(name, systemImage string, memoryMB, cores i
 		return fmt.Errorf("系统镜像包格式无效 (%s)，应为 system-images;android-<API>;<tag>;<abi>", systemImage)
 	}
 
-	sysImgDir := filepath.Join(c.sdkRoot, "system-images", apiFolder, tagDir, abi)
+	sysImgDir := filepath.Join(sdkRoot, "system-images", apiFolder, tagDir, abi)
 	if !dirExists(sysImgDir) {
 		return fmt.Errorf("本地未找到已安装的系统镜像目录: %s", sysImgDir)
 	}
 
 	// Ensure package.xml and platforms/<apiFolder> placeholder exist so emulator.exe accepts the image.
-	if err := EnsureSystemImageMetadata(c.sdkRoot, systemImage); err != nil {
+	if err := EnsureSystemImageMetadata(sdkRoot, systemImage); err != nil {
 		return err
 	}
 
@@ -79,13 +139,25 @@ func (c *Controller) CreateAVDNative(name, systemImage string, memoryMB, cores i
 		playStoreEnabled = "true"
 	}
 
+	memoryMB := opts.MemoryMB
 	if memoryMB <= 0 {
 		memoryMB = config.Values.Create.MemoryMB
 	}
+	cores := opts.Cores
 	if cores <= 0 {
 		cores = config.Values.Create.Cores
 	}
-	res := LookupResolution(resolution)
+	storageGB := opts.StorageGB
+	if storageGB <= 0 {
+		storageGB = 6
+	}
+	res := LookupResolution(opts.Resolution)
+	forceColdBoot := "yes"
+	forceFastBoot := "no"
+	if opts.QuickBoot {
+		forceColdBoot = "no"
+		forceFastBoot = "yes"
+	}
 
 	// Relative sysdir with trailing backslash as expected by emulator.exe on Windows.
 	relSysDir := filepath.Join("system-images", apiFolder, tagDir, abi) + string(os.PathSeparator)
@@ -103,11 +175,11 @@ func (c *Controller) CreateAVDNative(name, systemImage string, memoryMB, cores i
 	w("abi.type", abi)
 	w("avd.ini.displayname", name)
 	w("avd.ini.encoding", "UTF-8")
-	w("disk.dataPartition.size", "6G")
+	w("disk.dataPartition.size", fmt.Sprintf("%dG", storageGB))
 	w("fastboot.chosenSnapshotFile", "")
 	w("fastboot.forceChosenSnapshotBoot", "no")
-	w("fastboot.forceColdBoot", "yes")
-	w("fastboot.forceFastBoot", "no")
+	w("fastboot.forceColdBoot", forceColdBoot)
+	w("fastboot.forceFastBoot", forceFastBoot)
 	w("hw.accelerometer", "yes")
 	w("hw.arc", "false")
 	w("hw.audioInput", "yes")
@@ -127,7 +199,7 @@ func (c *Controller) CreateAVDNative(name, systemImage string, memoryMB, cores i
 	w("hw.gpu.enabled", "yes")
 	w("hw.gpu.mode", "auto")
 	w("hw.gyroscope", "yes")
-	w("hw.initialOrientation", "portrait")
+	w("hw.initialOrientation", res.Orientation)
 	w("hw.keyboard", "yes")
 	w("hw.lcd.density", strconv.Itoa(res.Density))
 	w("hw.lcd.height", strconv.Itoa(res.Height))
@@ -163,11 +235,73 @@ func (c *Controller) CreateAVDNative(name, systemImage string, memoryMB, cores i
 	}
 
 	iniPath := filepath.Join(c.avdHome, name+".ini")
-	iniContent := fmt.Sprintf("avd.ini.encoding=UTF-8\npath=%s\npath.rel=%s\ntarget=%s\n", avdDir, filepath.Join("avd", name+".avd"), apiFolder)
+	iniContent := fmt.Sprintf("avd.ini.encoding=UTF-8\npath=%s\npath.rel=%s\ntarget=%s\n",
+		cleanIniLine(avdDir), cleanIniLine(filepath.Join("avd", name+".avd")), cleanIniLine(apiFolder))
 	if err := os.WriteFile(iniPath, []byte(iniContent), 0o644); err != nil {
 		return fmt.Errorf("写入 %s.ini 失败: %w", name, err)
 	}
 	return nil
+}
+
+// UpdateAVDConfig updates hardware, resolution/orientation, and quick-boot settings in an existing AVD's config.ini.
+func (c *Controller) UpdateAVDConfig(avdName string, memoryMB, cores int, resolution string, quickBoot bool) error {
+	if c.avdHome == "" || !isSafePathSegment(avdName) {
+		return fmt.Errorf("无效的 AVD 配置路径: %s", avdName)
+	}
+	cfgPath := filepath.Join(c.avdHome, avdName+".avd", "config.ini")
+	data, err := os.ReadFile(cfgPath)
+	if err != nil {
+		return err
+	}
+
+	updates := map[string]string{
+		"fastboot.forceColdBoot": "yes",
+		"fastboot.forceFastBoot": "no",
+	}
+	if quickBoot {
+		updates["fastboot.forceColdBoot"] = "no"
+		updates["fastboot.forceFastBoot"] = "yes"
+	}
+	if memoryMB > 0 {
+		updates["hw.ramSize"] = strconv.Itoa(memoryMB)
+	}
+	if cores > 0 {
+		updates["hw.cpu.ncore"] = strconv.Itoa(cores)
+	}
+	if strings.TrimSpace(resolution) != "" {
+		res, err := ParseResolution(resolution)
+		if err != nil {
+			return err
+		}
+		updates["hw.lcd.width"] = strconv.Itoa(res.Width)
+		updates["hw.lcd.height"] = strconv.Itoa(res.Height)
+		updates["hw.lcd.density"] = strconv.Itoa(res.Density)
+		updates["hw.initialOrientation"] = res.Orientation
+	}
+
+	lines := strings.Split(strings.ReplaceAll(string(data), "\r\n", "\n"), "\n")
+	seen := make(map[string]bool, len(updates))
+	for i, line := range lines {
+		k, _, ok := strings.Cut(line, "=")
+		if !ok {
+			continue
+		}
+		key := strings.TrimSpace(k)
+		if val, want := updates[key]; want {
+			lines[i] = key + "=" + cleanIniLine(val)
+			seen[key] = true
+		}
+	}
+	for k, v := range updates {
+		if !seen[k] {
+			if len(lines) > 0 && lines[len(lines)-1] == "" {
+				lines = append(lines[:len(lines)-1], k+"="+cleanIniLine(v), "")
+			} else {
+				lines = append(lines, k+"="+cleanIniLine(v))
+			}
+		}
+	}
+	return os.WriteFile(cfgPath, []byte(strings.Join(lines, "\n")), 0o644)
 }
 
 // EnsureSystemImageMetadata generates a valid Android SDK package.xml inside the system image directory
@@ -328,12 +462,13 @@ func (c *Controller) HealAVDIniPaths() error {
 			}
 			switch strings.TrimSpace(k) {
 			case "path":
-				if strings.TrimSpace(v) != expectedAVDDir {
-					lines[i] = "path=" + expectedAVDDir
+				cleanExpected := cleanIniLine(expectedAVDDir)
+				if strings.TrimSpace(v) != cleanExpected {
+					lines[i] = "path=" + cleanExpected
 					changed = true
 				}
 			case "path.rel":
-				rel := filepath.Join("avd", baseName+".avd")
+				rel := cleanIniLine(filepath.Join("avd", baseName+".avd"))
 				if strings.TrimSpace(v) != rel {
 					lines[i] = "path.rel=" + rel
 					changed = true
@@ -371,10 +506,31 @@ func validateDataDirForHost(dataDir, host string) (asciiOK bool, writableOK bool
 	}
 	var warns []string
 	if !asciiOK {
-		warns = append(warns, fmt.Sprintf("当前路径 %q 含有中文或非 ASCII 字符，Android Emulator 可能启动失败，建议将程序文件夹移至纯英文路径（如 D:\\VirDeck）", dataDir))
+		warns = append(warns, fmt.Sprintf("当前路径 %q 含有中文或非 ASCII 字符，Android Emulator 可能启动失败，建议点击「一键改用纯英文数据目录」或移至纯英文路径（如 D:\\VirDeck）", dataDir))
 	}
 	if !writableOK {
 		warns = append(warns, fmt.Sprintf("当前目录 %q 无写入权限，请将程序移至普通可写目录或以管理员身份运行", dataDir))
+	}
+	return asciiOK, writableOK, strings.Join(warns, "；")
+}
+
+func validateEffectiveDataDir(rawDir, effectiveDir, compatMode, host string) (asciiOK bool, writableOK bool, warningMsg string) {
+	if strings.TrimSpace(effectiveDir) == "" {
+		effectiveDir = rawDir
+	}
+	rawASCII, writableOK, _ := validateDataDirForHost(rawDir, host)
+	effASCII := host != "windows" || IsPureASCII(effectiveDir)
+	asciiOK = rawASCII || effASCII
+
+	var warns []string
+	if !asciiOK {
+		warns = append(warns, fmt.Sprintf("当前路径 %q 含有中文或非 ASCII 字符且未能自动建立 8.3 短路径或 NTFS 目录联接，建议点击「一键改用纯英文数据目录」或将程序移至纯英文路径", rawDir))
+	} else if host == "windows" && !rawASCII && compatMode == PathCompatFailed {
+		// Defensive fallback (only hit if effectiveDir remained non-ASCII).
+		asciiOK = false
+	}
+	if !writableOK {
+		warns = append(warns, fmt.Sprintf("当前目录 %q 无写入权限，请将程序移至普通可写目录或以管理员身份运行", rawDir))
 	}
 	return asciiOK, writableOK, strings.Join(warns, "；")
 }
@@ -420,11 +576,13 @@ func splitSystemImageID(systemImage string) (apiFolder, tagDir, abi string, ok b
 }
 
 func isSafePathSegment(seg string) bool {
-	if seg == "" || seg == "." || seg == ".." {
+	if seg == "" || seg == "." || seg == ".." || strings.HasPrefix(seg, "-") || strings.TrimRight(seg, ". ") != seg {
 		return false
 	}
-	if strings.ContainsAny(seg, `/\:*?"<>|`+"\x00\r\n") {
-		return false
+	for _, r := range seg {
+		if r < 0x20 || r == 0x7f || strings.ContainsRune(`/\:*?"<>|`, r) {
+			return false
+		}
 	}
 	return true
 }

@@ -196,8 +196,8 @@ func TestTransferModalDismissalKeepsActiveControlsReachable(t *testing.T) {
 					tester.ClickAt(5, 475)
 				}
 				tester.Frame()
-				if !vm.transfer.show {
-					t.Fatal("dismissal hid active transfer controls")
+				if !vm.transfer.show || vm.page != pageTransfer {
+					t.Fatal("dismissal hid active transfer page")
 				}
 				tester.Frame()
 				if state == "busy" {

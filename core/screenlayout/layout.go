@@ -24,6 +24,15 @@ type Window struct {
 // Widths round up to preserve the client aspect ratio within one pixel. Frame
 // extents remain fixed. Outer margins are omitted only if no grid fits with them.
 func Tile(work Rect, windows []Window, clientHeight, gap int) ([]Rect, error) {
+	return TileGrid(work, windows, 0, clientHeight, gap)
+}
+
+// TileGrid arranges windows in a row-major grid, optionally fixing the number of
+// windows per row when columns > 0 (clamped to len(windows)).
+func TileGrid(work Rect, windows []Window, columns, clientHeight, gap int) ([]Rect, error) {
+	if columns < 0 {
+		return nil, fmt.Errorf("invalid columns count")
+	}
 	if len(windows) == 0 {
 		return []Rect{}, nil
 	}
@@ -35,9 +44,14 @@ func Tile(work Rect, windows []Window, clientHeight, gap int) ([]Rect, error) {
 			return nil, fmt.Errorf("window %d has invalid client or frame dimensions", i+1)
 		}
 	}
+	minCols, maxCols := 1, len(windows)
+	if columns > 0 {
+		c := min(columns, len(windows))
+		minCols, maxCols = c, c
+	}
 	bestHeight, bestColumns, margin := 0, 0, gap
 	for {
-		for columns := 1; columns <= len(windows); columns++ {
+		for cols := minCols; cols <= maxCols; cols++ {
 			hi := work.Height
 			if clientHeight > 0 && clientHeight < hi {
 				hi = clientHeight
@@ -45,14 +59,14 @@ func Tile(work Rect, windows []Window, clientHeight, gap int) ([]Rect, error) {
 			lo := 0
 			for lo < hi {
 				mid := lo + (hi-lo+1)/2
-				if gridFits(work, windows, columns, mid, gap, margin) {
+				if gridFits(work, windows, cols, mid, gap, margin) {
 					lo = mid
 				} else {
 					hi = mid - 1
 				}
 			}
 			if lo > bestHeight {
-				bestHeight, bestColumns = lo, columns
+				bestHeight, bestColumns = lo, cols
 			}
 		}
 		if bestHeight > 0 || margin == 0 {

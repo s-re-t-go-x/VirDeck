@@ -167,6 +167,11 @@ func (m *Manager) CleanCaches(ctx context.Context, opts CleanupOptions) (Cleanup
 			errs = append(errs, err)
 			break
 		}
+		info, lerr := os.Lstat(file.base)
+		if lerr != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+			errs = append(errs, fmt.Errorf("清理目录不是普通目录: %s", file.base))
+			continue
+		}
 		root, err := os.OpenRoot(file.base)
 		if err == nil {
 			err = root.Remove(file.rel)

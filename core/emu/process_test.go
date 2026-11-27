@@ -103,3 +103,29 @@ func TestStartProcessReportsExitWithInheritedOutputPipe(t *testing.T) {
 		t.Fatal("exited emulator still waits for a helper's inherited output pipe")
 	}
 }
+
+func TestBuildStartArgsProxyDoesNotForcePublicDNS(t *testing.T) {
+	args := buildStartArgs(LaunchOptions{
+		AVDName:  "test_avd",
+		Port:     5554,
+		Proxy:    "http://127.0.0.1:7890",
+		Headless: true,
+	})
+	joined := strings.Join(args, " ")
+	if !strings.Contains(joined, "-http-proxy http://127.0.0.1:7890") {
+		t.Fatalf("missing -http-proxy in args: %v", args)
+	}
+	if strings.Contains(joined, "-dns-server") || strings.Contains(joined, "8.8.8.8") {
+		t.Fatalf("proxy launch must not force hardcoded public DNS: %v", args)
+	}
+
+	withDNS := buildStartArgs(LaunchOptions{
+		AVDName:   "test_avd",
+		Port:      5554,
+		Proxy:     "http://127.0.0.1:7890",
+		DNSServer: "1.1.1.1",
+	})
+	if !strings.Contains(strings.Join(withDNS, " "), "-dns-server 1.1.1.1") {
+		t.Fatalf("explicit DNSServer not applied: %v", withDNS)
+	}
+}

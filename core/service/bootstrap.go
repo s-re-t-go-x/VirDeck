@@ -38,7 +38,7 @@ func loadSettings(path string) Settings {
 	if s.MaxConcurrent <= 0 {
 		s.MaxConcurrent = DefaultMaxConcurrent
 	}
-	if s.ADBServerPort <= 0 {
+	if s.ADBServerPort <= 0 || s.ADBServerPort > 65535 {
 		s.ADBServerPort = emu.DefaultADBServerPort
 	}
 	if !validScreenSize(s.ScreenLayout.Size) {
@@ -59,26 +59,56 @@ func loadSettings(path string) Settings {
 	return s
 }
 
-func saveSettings(path string, s Settings) error {
+func writeFileAtomic(path string, data []byte, dirPerm, filePerm os.FileMode) error {
 	if path == "" {
 		return nil
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, dirPerm); err != nil {
 		return err
+	}
+	f, err := os.CreateTemp(dir, ".virdeck-*.tmp")
+	if err != nil {
+		return err
+	}
+	tmp := f.Name()
+	cleanup := true
+	defer func() {
+		if cleanup {
+			_ = os.Remove(tmp)
+		}
+	}()
+	if err := f.Chmod(filePerm); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if _, err := f.Write(data); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		return err
+	}
+	cleanup = false
+	return nil
+}
+
+func saveSettings(path string, s Settings) error {
+	if path == "" {
+		return nil
 	}
 	raw, err := json.MarshalIndent(s, "", "  ")
 	if err != nil {
 		return err
 	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, raw, 0o600); err != nil {
-		return err
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		_ = os.Remove(tmp)
-		return err
-	}
-	return nil
+	return writeFileAtomic(path, raw, 0o700, 0o600)
 }
 
 // GetSettings returns the current global settings.
@@ -93,7 +123,7 @@ func (m *Manager) UpdateSettings(s Settings) error {
 	if s.MaxConcurrent <= 0 {
 		s.MaxConcurrent = DefaultMaxConcurrent
 	}
-	if s.ADBServerPort <= 0 {
+	if s.ADBServerPort <= 0 || s.ADBServerPort > 65535 {
 		s.ADBServerPort = emu.DefaultADBServerPort
 	}
 	s.DownloadProxy = strings.TrimSpace(s.DownloadProxy)
@@ -147,7 +177,7 @@ func (m *Manager) SyncCatalog(ctx context.Context) (int, error) {
 	m.emitLog("", "正在从 Google 官方仓库同步系统镜像列表...")
 	n, err := m.cat.SyncFromOfficial(ctx, m.dl)
 	if err != nil {
-		m.emitLog("", fmt.Sprintf("同步官方镜像列表失败: %v", err))
+		m.emitLog("", fmt.Sprintf("同步官方镜像列表失败: %s", config.RedactError(err)))
 		return n, err
 	}
 	m.emitLog("", fmt.Sprintf("已同步 %d 个官方系统镜像条目", n))
@@ -182,6 +212,11 @@ func (m *Manager) RemoveCustomImage(ctx context.Context, id string) error {
 // DeleteSystemImage deletes the locally installed files of a system image,
 // refusing if any registered instance uses that image.
 func (m *Manager) DeleteSystemImage(ctx context.Context, id string) error {
+	m.namesMu.Lock()
+	defer m.namesMu.Unlock()
+	m.maintenance.RLock()
+	defer m.maintenance.RUnlock()
+
 	id = strings.TrimSpace(id)
 	for _, inst := range m.registry.List() {
 		if inst.SystemImage == id {
@@ -195,13 +230,24 @@ func (m *Manager) DeleteSystemImage(ctx context.Context, id string) error {
 
 	deletedAny := false
 	for _, root := range m.candidateSDKRoots() {
-		target := filepath.Join(root, "system-images", apiDir, tag, abi)
-		if info, err := os.Stat(target); err == nil && info.IsDir() {
-			if err := os.RemoveAll(target); err != nil {
-				return fmt.Errorf("删除镜像目录 %s 失败: %w", target, err)
+		sysBase := filepath.Join(root, "system-images")
+		baseInfo, lerr := os.Lstat(sysBase)
+		if lerr != nil || !baseInfo.IsDir() || baseInfo.Mode()&os.ModeSymlink != 0 {
+			continue
+		}
+		rootHandle, oerr := os.OpenRoot(sysBase)
+		if oerr != nil {
+			continue
+		}
+		rel := filepath.Join(apiDir, tag, abi)
+		if _, serr := rootHandle.Stat(rel); serr == nil {
+			if rerr := rootHandle.RemoveAll(rel); rerr != nil {
+				_ = rootHandle.Close()
+				return fmt.Errorf("删除镜像目录 %s 失败: %w", filepath.Join(sysBase, rel), rerr)
 			}
 			deletedAny = true
 		}
+		_ = rootHandle.Close()
 	}
 	if !deletedAny {
 		return fmt.Errorf("本地未找到该镜像的安装目录: %s", id)
@@ -229,17 +275,17 @@ func (m *Manager) DownloadSystemImage(ctx context.Context, id string) error {
 	}
 
 	urlStr := strings.TrimSpace(item.URL)
-	expectedSHA1 := strings.TrimSpace(item.SHA1)
+	expectedChecksum := item.EffectiveChecksum()
 
-	// If URL or SHA-1 is missing (or to get the latest official SHA-1), query official sys-img XML first.
-	if urlStr == "" || (item.Source == catalog.SourceRecommended && expectedSHA1 == "") {
+	// If URL or checksum is missing (or to get the latest official SHA-1), query official sys-img XML first.
+	if urlStr == "" || (item.Source == catalog.SourceRecommended && expectedChecksum == "") {
 		if _, err := m.cat.SyncFromOfficial(ctx, m.dl); err == nil {
 			if refreshed, ok2 := m.cat.Get(id, m.emu.ListSystemImages()); ok2 {
 				if refreshed.URL != "" {
 					urlStr = refreshed.URL
 				}
-				if refreshed.SHA1 != "" {
-					expectedSHA1 = refreshed.SHA1
+				if csum := refreshed.EffectiveChecksum(); csum != "" {
+					expectedChecksum = csum
 				}
 			}
 		}
@@ -248,8 +294,8 @@ func (m *Manager) DownloadSystemImage(ctx context.Context, id string) error {
 		return fmt.Errorf("镜像 %s 缺少下载直链，请先同步官方列表或在自定义镜像中填写 URL", id)
 	}
 
-	m.emitLog("", fmt.Sprintf("开始下载系统镜像 %s (%s)...", item.Name, urlStr))
-	zipPath, err := m.dl.Download(ctx, id, item.Name, urlStr, expectedSHA1, m.onDownloadProgress)
+	m.emitLog("", fmt.Sprintf("开始下载系统镜像 %s (%s)...", item.Name, config.RedactProxyURL(urlStr)))
+	zipPath, err := m.dl.Download(ctx, id, item.Name, urlStr, expectedChecksum, m.onDownloadProgress)
 	if err != nil {
 		m.emitDownloadFailed(id, item.Name, err)
 		return err
@@ -259,6 +305,7 @@ func (m *Manager) DownloadSystemImage(ctx context.Context, id string) error {
 		m.emitDownloadFailed(id, item.Name, err)
 		return err
 	}
+	m.cleanupDownloadedArchive(zipPath)
 	return nil
 }
 
@@ -354,6 +401,7 @@ func (m *Manager) EnsureBaseTool(ctx context.Context, tool string) error {
 		m.emitDownloadFailed("tool:"+tool, title, err)
 		return err
 	}
+	m.cleanupDownloadedArchive(zipPath)
 
 	_, _ = m.CheckEnv(ctx)
 	m.emitLog("", fmt.Sprintf("基础组件 %s 已安装至 %s", title, destDir))
@@ -437,6 +485,7 @@ func (m *Manager) resolveBaseToolSource(ctx context.Context, tool string) (urlSt
 		title = "scrcpy 投屏工具"
 		destDir = filepath.Join(m.dataDir(), "scrcpy")
 		urlStr = downloader.FallbackScrcpyURL
+		sha1Hex = downloader.FallbackScrcpyChecksum
 		if urlStr == "" {
 			err = fmt.Errorf("scrcpy 未提供适配 %s/%s 的官方预编译包，请安装本地 scrcpy", runtime.GOOS, runtime.GOARCH)
 		}
@@ -444,6 +493,17 @@ func (m *Manager) resolveBaseToolSource(ctx context.Context, tool string) (urlSt
 	default:
 		return "", "", "", "", fmt.Errorf("不支持的工具类型: %s", tool)
 	}
+}
+
+func (m *Manager) cleanupDownloadedArchive(archivePath string) {
+	if archivePath == "" || !m.GetSettings().AutoDeleteDownloads {
+		return
+	}
+	if err := os.Remove(archivePath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		m.emitLog("", fmt.Sprintf("自动清理下载压缩包 %s 失败: %v", filepath.Base(archivePath), err))
+		return
+	}
+	m.emitLog("", fmt.Sprintf("已自动清理下载压缩包: %s", filepath.Base(archivePath)))
 }
 
 func (m *Manager) onDownloadProgress(p DownloadProgress) {
@@ -456,16 +516,17 @@ func (m *Manager) onDownloadProgress(p DownloadProgress) {
 }
 
 func (m *Manager) emitDownloadFailed(id, name string, err error) {
-	m.emitLog("", fmt.Sprintf("下载/安装 %s 失败: %v", name, err))
+	redacted := config.RedactError(err)
+	m.emitLog("", fmt.Sprintf("下载/安装 %s 失败: %s", name, redacted))
 	m.emit(Event{
 		Type:      EventDownloadProgress,
-		Message:   fmt.Sprintf("下载 %s 失败: %v", name, err),
+		Message:   fmt.Sprintf("下载 %s 失败: %s", name, redacted),
 		Timestamp: nowStamp(),
 		Data: DownloadProgress{
 			TargetID: id,
 			Name:     name,
 			Stage:    "failed",
-			Error:    err.Error(),
+			Error:    redacted,
 		},
 	})
 }

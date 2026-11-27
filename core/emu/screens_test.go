@@ -3,6 +3,7 @@ package emu
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -24,9 +25,9 @@ func init() {
 		return
 	}
 	title := ""
-	for i, arg := range os.Args {
-		if arg == "--window-title" && i+1 < len(os.Args) {
-			title = os.Args[i+1]
+	for _, arg := range os.Args {
+		if strings.HasPrefix(arg, "--window-title=") {
+			title = strings.TrimPrefix(arg, "--window-title=")
 		}
 	}
 	raw, _ := json.Marshal(screenLaunch{PID: os.Getpid(), Title: title, Args: os.Args[1:]})
@@ -49,12 +50,17 @@ type testScreenHost struct {
 	activations []int
 	placements  map[int]screenlayout.Rect
 	titles      map[int]string
+	exeBlank    bool
+	suppress    bool
 }
 
 func (h *testScreenHost) windows() ([]screenlayout.Window, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	out := append([]screenlayout.Window(nil), h.seeds...)
+	if h.suppress {
+		return out, nil
+	}
 	raw, _ := os.ReadFile(h.file)
 	for _, line := range strings.Split(strings.TrimSpace(string(raw)), "\n") {
 		var launch screenLaunch
@@ -65,7 +71,11 @@ func (h *testScreenHost) windows() ([]screenlayout.Window, error) {
 		if replacement := h.titles[launch.PID]; replacement != "" {
 			title = replacement
 		}
-		out = append(out, screenlayout.Window{Handle: uintptr(launch.PID), PID: launch.PID, Title: title, Executable: h.exe, Bounds: screenlayout.Rect{Width: 376, Height: 680}, ClientWidth: 360, ClientHeight: 640, Scale: 1})
+		exe := h.exe
+		if h.exeBlank {
+			exe = ""
+		}
+		out = append(out, screenlayout.Window{Handle: uintptr(launch.PID), PID: launch.PID, Title: title, Executable: exe, Bounds: screenlayout.Rect{Width: 376, Height: 680}, ClientWidth: 360, ClientHeight: 640, Scale: 1})
 	}
 	return out, nil
 }
@@ -384,5 +394,130 @@ func TestProjectionOverflowMaximizedWindowKeepsWholeMonitorOccupied(t *testing.T
 	n, err := c.ArrangeProjection(context.Background(), []string{"one", "two"}, ScreenLayoutOptions{DisplayID: "primary", Height: 300, Gap: 8})
 	if n != 0 || err == nil || len(h.placements) != 0 {
 		t.Fatalf("placed underneath unchanged maximized window %d %v %v", n, err, h.placements)
+	}
+}
+
+func TestProjectionWaitMatchesLaunchedPIDWhenExecutableUnavailable(t *testing.T) {
+	c, h := projectionTestController(t)
+	h.mu.Lock()
+	h.exeBlank = true
+	h.mu.Unlock()
+	created, err := c.StartProjection(context.Background(), "one", 5554, "account (emulator-5554)")
+	if !created || err != nil {
+		t.Fatalf("expected projection to match launched PID with blank executable, got created=%v err=%v", created, err)
+	}
+
+	matchingTitle := projectionTitle("one", "account (emulator-5554)")
+	wrongTitle := projectionTitle("two", "other (emulator-5556)")
+	if !matchesLaunchedProjection(screenlayout.Window{Handle: 10, PID: 100, Title: matchingTitle, Executable: ""}, 100, "one", h.exe) {
+		t.Fatal("expected blank executable with matching marker title to match")
+	}
+	if matchesLaunchedProjection(screenlayout.Window{Handle: 10, PID: 100, Title: wrongTitle, Executable: ""}, 100, "one", h.exe) {
+		t.Fatal("must reject blank executable with mismatched marker title")
+	}
+	otherExe := filepath.Join(t.TempDir(), "other.exe")
+	if matchesLaunchedProjection(screenlayout.Window{Handle: 10, PID: 100, Title: matchingTitle, Executable: otherExe}, 100, "one", h.exe) {
+		t.Fatal("must reject mismatched non-empty executable even when PID and title match")
+	}
+}
+
+func TestSameProjectionExecutableMatchesSameFileAlias(t *testing.T) {
+	dir := t.TempDir()
+	orig := filepath.Join(dir, "scrcpy.exe")
+	if err := os.WriteFile(orig, []byte("stub"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	alias := filepath.Join(dir, "scrcpy-alias.exe")
+	if err := os.Link(orig, alias); err != nil {
+		t.Skipf("os.Link unsupported here: %v", err)
+	}
+	other := filepath.Join(dir, "different.exe")
+	if err := os.WriteFile(other, []byte("other"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if !sameProjectionExecutable(orig, alias) {
+		t.Fatalf("expected %q and hard-link %q to match via SameFile", orig, alias)
+	}
+	if sameProjectionExecutable(orig, other) {
+		t.Fatalf("expected distinct files %q and %q not to match", orig, other)
+	}
+	if sameProjectionExecutable(orig, filepath.Join(dir, "missing.exe")) {
+		t.Fatal("expected missing file not to match")
+	}
+}
+
+func TestProjectionCancelKillsFreshProcessBeforeWindowReady(t *testing.T) {
+	c, h := projectionTestController(t)
+	h.mu.Lock()
+	h.suppress = true
+	h.mu.Unlock()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	timer := time.AfterFunc(150*time.Millisecond, cancel)
+	defer timer.Stop()
+	defer cancel()
+	created, err := c.StartProjection(ctx, "one", 5554, "account (emulator-5554)")
+	if created || !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected Canceled on caller cancel, got created=%v err=%v", created, err)
+	}
+
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		c.screenMu.Lock()
+		p := c.projections["one"]
+		c.screenMu.Unlock()
+		if p == nil {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatal("canceled fresh projection process did not exit promptly")
+}
+
+func TestProjectionArrangeWithExplicitColumns(t *testing.T) {
+	c, h := projectionTestController(t)
+	seedLayoutWindows(h)
+	h.displays[0].WorkArea = screenlayout.Rect{Width: 1000, Height: 900}
+	n, err := c.ArrangeProjection(context.Background(), []string{"one", "two", "three"}, ScreenLayoutOptions{
+		DisplayID: "primary",
+		Columns:   2,
+		Gap:       8,
+	})
+	if err != nil || n != 3 {
+		t.Fatalf("ArrangeProjection(Columns=2) failed: n=%d err=%v", n, err)
+	}
+	r1, r2, r3 := h.placements[10], h.placements[11], h.placements[12]
+	if r1.Y != r2.Y || r3.Y <= r1.Y {
+		t.Fatalf("expected 2 per row layout, got r1=%+v r2=%+v r3=%+v", r1, r2, r3)
+	}
+}
+
+func TestStartProjectionUsesEqualsWindowTitleFlag(t *testing.T) {
+	c, h := projectionTestController(t)
+	created, err := c.StartProjection(context.Background(), "dash", 5554, "--dash-title")
+	if err != nil || !created {
+		t.Fatalf("StartProjection failed: created=%v err=%v", created, err)
+	}
+	raw, err := os.ReadFile(h.file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var launch screenLaunch
+	if err := json.Unmarshal([]byte(strings.TrimSpace(string(raw))), &launch); err != nil {
+		t.Fatal(err)
+	}
+	wantPrefix := "--window-title=--dash-title"
+	found := false
+	for _, arg := range launch.Args {
+		if strings.HasPrefix(arg, wantPrefix) {
+			found = true
+		}
+		if arg == "--window-title" {
+			t.Fatalf("expected --window-title= form without separate value arg, got %q", launch.Args)
+		}
+	}
+	if !found {
+		t.Fatalf("missing %s* in launched args %q", wantPrefix, launch.Args)
 	}
 }

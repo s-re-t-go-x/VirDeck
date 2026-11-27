@@ -18,9 +18,13 @@ type screenTestService struct {
 	service.Service
 	snapshot        service.ScreenLayoutSnapshot
 	request         service.ScreenLayoutRequest
+	saveReq         service.ScreenLayoutRequest
+	restoreReq      service.ScreenLayoutRequest
+	deletedPreset   string
 	calls           int
 	saved, restored int
 	autoFill        bool
+	rememberPos     bool
 }
 
 func (s *screenTestService) InspectScreenLayout(context.Context) (service.ScreenLayoutSnapshot, error) {
@@ -177,14 +181,32 @@ func TestScreenLayoutDropdownsUpdateRequestValues(t *testing.T) {
 
 func (s *screenTestService) SaveScreenLayout(_ context.Context, r service.ScreenLayoutRequest) (int, error) {
 	s.saved++
+	s.saveReq = r
+	if r.PresetName != "" {
+		s.snapshot.Presets = []service.ScreenLayoutPresetSummary{{
+			Name:        r.PresetName,
+			GroupID:     r.GroupID,
+			WindowCount: 2,
+		}}
+	}
 	return 2, nil
 }
 func (s *screenTestService) RestoreScreenLayout(_ context.Context, r service.ScreenLayoutRequest) (int, error) {
 	s.restored++
+	s.restoreReq = r
 	return 2, nil
+}
+func (s *screenTestService) DeleteScreenLayoutPreset(_ context.Context, name string) error {
+	s.deletedPreset = name
+	s.snapshot.Presets = nil
+	return nil
 }
 func (s *screenTestService) SetScreenAutoFill(_ context.Context, enabled bool) error {
 	s.autoFill = enabled
+	return nil
+}
+func (s *screenTestService) SetScreenRememberPosition(_ context.Context, enabled bool) error {
+	s.rememberPos = enabled
 	return nil
 }
 func TestScreenLayoutReferenceSaveRestoreAndAutoFillControls(t *testing.T) {
@@ -292,5 +314,59 @@ func TestRenderReferenceScreenLayout(t *testing.T) {
 			t.Fatal(err)
 		}
 		_ = f.Close()
+	}
+}
+
+func TestScreenLayoutNamedGroupPresetSaveRestoreDelete(t *testing.T) {
+	vm := newTestVM(t)
+	vm.groups.snapshot = service.GroupSnapshot{
+		Groups:      []service.Group{{ID: "social", Name: "社媒"}},
+		Memberships: map[string]string{"a1b2c3d4": "social", "0a0b0c0d": "social"},
+	}
+	svc := &screenTestService{Service: vm.svc, snapshot: sampleScreenSnapshot()}
+	vm.svc = svc
+	posts := make(chan func(), 8)
+	vm.post = func(f func()) { posts <- f }
+
+	vm.openScreenLayoutForGroup("social", "社媒")
+	awaitScreenPost(t, posts)
+
+	vm.screens.presetName = "社媒双屏"
+	tester := ui.NewTester(vm.view, 760, 820)
+	tester.Frame()
+	if err := tester.Click("保存快照"); err != nil {
+		t.Fatalf("click 保存快照 failed: %v", err)
+	}
+	awaitScreenPost(t, posts)
+	tester.Frame()
+	if svc.saveReq.PresetName != "社媒双屏" || svc.saveReq.GroupID != "social" {
+		t.Fatalf("unexpected SaveScreenLayout request: %+v", svc.saveReq)
+	}
+
+	if err := tester.Click("恢复快照"); err != nil {
+		t.Fatalf("click 恢复快照 failed: %v", err)
+	}
+	awaitScreenPost(t, posts)
+	tester.Frame()
+	if svc.restoreReq.PresetName != "社媒双屏" || svc.restoreReq.GroupID != "social" {
+		t.Fatalf("unexpected RestoreScreenLayout request: %+v", svc.restoreReq)
+	}
+
+	if err := tester.Click("删除快照"); err != nil {
+		t.Fatalf("click 删除快照 failed: %v", err)
+	}
+	awaitScreenPost(t, posts)
+	if svc.deletedPreset != "社媒双屏" {
+		t.Fatalf("expected DeleteScreenLayoutPreset('社媒双屏'), got %q", svc.deletedPreset)
+	}
+
+	vm.screens.columns = 3
+	tester.Frame()
+	if err := tester.Click("记住每个实例上次投屏窗口位置"); err != nil {
+		t.Fatalf("click remember position checkbox failed: %v", err)
+	}
+	awaitScreenPost(t, posts)
+	if !svc.rememberPos || vm.screenLayoutRequest().Columns != 3 {
+		t.Fatalf("expected rememberPos=true and Columns=3, got rem=%v cols=%d", svc.rememberPos, vm.screenLayoutRequest().Columns)
 	}
 }

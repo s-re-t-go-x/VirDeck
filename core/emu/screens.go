@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
@@ -111,9 +112,52 @@ func ownedProjection(w screenlayout.Window, exe string) bool {
 }
 func sameProjectionExecutable(a, b string) bool {
 	if runtime.GOOS == "windows" {
-		return strings.EqualFold(a, b)
+		if strings.EqualFold(a, b) {
+			return true
+		}
+	} else if a == b {
+		return true
 	}
-	return a == b
+	if a != "" && b != "" {
+		fiA, errA := os.Stat(a)
+		fiB, errB := os.Stat(b)
+		if errA == nil && errB == nil && os.SameFile(fiA, fiB) {
+			return true
+		}
+	}
+	return false
+}
+
+func matchesLaunchedProjection(w screenlayout.Window, pid int, id, exe string) bool {
+	if w.Handle == 0 || w.PID != pid {
+		return false
+	}
+	if ownedProjection(w, exe) {
+		return true
+	}
+	if w.Executable == "" {
+		gotID, tagged := projectionID(w.Title)
+		return tagged && gotID == id
+	}
+	return false
+}
+
+func lastOutputLine(text string, maxRunes int) string {
+	lines := strings.Split(strings.TrimSpace(text), "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		line := strings.TrimSpace(lines[i])
+		if line == "" {
+			continue
+		}
+		if maxRunes > 0 {
+			runes := []rune(line)
+			if len(runes) > maxRunes {
+				return string(runes[len(runes)-maxRunes:])
+			}
+		}
+		return line
+	}
+	return ""
 }
 func (c *Controller) scrcpyExecutable() (string, error) {
 	_, _, _, _, bin := c.ResolvePaths()
@@ -220,7 +264,7 @@ func (c *Controller) startProjectionAt(ctx context.Context, id string, port int,
 		return false, errors.New("旧投屏连接已变化，请关闭旧投屏窗口后重试")
 	}
 	if p == nil {
-		args := []string{"-s", fmt.Sprintf("emulator-%d", port), "--window-title", desired}
+		args := []string{"-s", fmt.Sprintf("emulator-%d", port), "--window-title=" + desired}
 		args = append(args, projectionSettingsArgs(settings)...)
 		if bounds != nil {
 			geometry, err := projectionBoundsArgs(*bounds)
@@ -284,7 +328,7 @@ func (c *Controller) startProjectionAt(ctx context.Context, id string, port int,
 			return false, err
 		}
 		for _, w := range windows {
-			if w.PID == p.cmd.Process.Pid && ownedProjection(w, exe) {
+			if matchesLaunchedProjection(w, p.cmd.Process.Pid, id, exe) {
 				if !fresh {
 					return false, host.activate(w)
 				}
@@ -295,7 +339,21 @@ func (c *Controller) startProjectionAt(ctx context.Context, id string, port int,
 		case <-p.done:
 			return false, fmt.Errorf("投屏进程已退出: %v %s", p.err, p.output.text())
 		case <-waitCtx.Done():
-			return false, fmt.Errorf("投屏窗口尚未就绪，请稍后再点投屏: %w", waitCtx.Err())
+			if ctx.Err() != nil {
+				if fresh {
+					c.screenMu.Lock()
+					p.intentional = true
+					c.screenMu.Unlock()
+					if p.cmd != nil && p.cmd.Process != nil {
+						_ = p.cmd.Process.Kill()
+					}
+				}
+				return false, ctx.Err()
+			}
+			if tail := lastOutputLine(p.output.text(), 200); tail != "" {
+				return false, fmt.Errorf("投屏窗口等待超时（投屏仍在初始化，请稍候或再次点击投屏）: %w；输出: %s", waitCtx.Err(), tail)
+			}
+			return false, fmt.Errorf("投屏窗口等待超时（投屏仍在初始化，请稍候或再次点击投屏）: %w", waitCtx.Err())
 		case <-ticker.C:
 		}
 	}

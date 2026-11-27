@@ -16,6 +16,13 @@ func hideConsole(cmd *exec.Cmd) {
 }
 func hideConsoleKeepGUI(cmd *exec.Cmd) { hideConsole(cmd) }
 
+func detachBackgroundProcess(cmd *exec.Cmd) {
+	if cmd.SysProcAttr == nil {
+		cmd.SysProcAttr = &syscall.SysProcAttr{}
+	}
+	cmd.SysProcAttr.Setsid = true
+}
+
 func forceKillTree(cmd *exec.Cmd) error {
 	// Only a group created by this launch is ours. Never signal an inherited
 	// group (which may contain VirDeck, a terminal, or unrelated processes).

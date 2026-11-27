@@ -8,11 +8,11 @@ func Close(w Window) error {
 	if err != nil {
 		return err
 	}
-	defer mac.release(a)
+	defer cfRelease(a)
 	button, err := axCopy(a, "AXCloseButton")
 	if err != nil {
 		return err
 	}
-	defer mac.release(button)
+	defer cfRelease(button)
 	return axPerform(button, "AXPress")
 }

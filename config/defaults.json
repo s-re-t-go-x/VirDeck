@@ -27,7 +27,8 @@
     "googleAPIsXML": "https://dl.google.com/android/repository/sys-img/google_apis/sys-img2-3.xml",
     "defaultXML": "https://dl.google.com/android/repository/sys-img/android/sys-img2-3.xml",
     "platformTools": "https://dl.google.com/android/repository/platform-tools-latest-windows.zip",
-    "scrcpy": "https://github.com/Genymobile/scrcpy/releases/download/v5.0.1/scrcpy-win64-v5.0.1.zip"
+    "scrcpy": "https://github.com/Genymobile/scrcpy/releases/download/v5.0.1/scrcpy-win64-v5.0.1.zip",
+    "scrcpySha256": "b12a2c4ee8be317422451fc7dcf8ee20a71b5ea7ef9ad73ddd825a25316227a5"
   },
   "images": [
     {
@@ -38,8 +39,20 @@
       "abi": "x86_64",
       "url": "",
       "favorite": true,
-      "note": "日常多开首选；Facebook / WhatsApp / Instagram 兼容",
+      "note": "日常多开首选；支持 ARM 转译与投屏声音；Facebook / WhatsApp / Instagram 兼容",
       "favoriteVersion": 1
+    },
+    {
+      "id": "system-images;android-34;google_apis_playstore;x86_64",
+      "name": "Android 14 (API 34) - Google Play 商店",
+      "apiLevel": "34",
+      "tagId": "google_apis_playstore",
+      "abi": "x86_64",
+      "url": "https://dl.google.com/android/repository/sys-img/google_apis_playstore/x86_64-34_r14.zip",
+      "sha1": "01d32617fd1937e540faf8731d70cf50e35af854",
+      "favorite": true,
+      "note": "主流新版本首选；支持 ARM 转译与投屏声音",
+      "favoriteVersion": 4
     },
     {
       "id": "system-images;android-28;google_apis_playstore;x86_64",
@@ -50,7 +63,7 @@
       "url": "https://dl.google.com/android/repository/sys-img/google_apis_playstore/x86_64-28_r08.zip",
       "sha1": "a767da996fdea7a1f5632a9206fa5c009d6e580c",
       "favorite": true,
-      "note": "Pie 兼容性，蓝叠常用；不支持投屏声音",
+      "note": "Pie 兼容性，蓝叠常用；不支持 ARM 转译与投屏声音",
       "favoriteVersion": 2
     },
     {
@@ -62,18 +75,8 @@
       "url": "https://dl.google.com/android/repository/sys-img/google_apis_playstore/x86-25_r09.zip",
       "sha1": "6f6668954f7fd52f896fe7528aa122028c9b026c",
       "favorite": true,
-      "note": "旧版 32 位 x86 应用兼容；不支持投屏声音",
+      "note": "旧版 32 位 x86 应用兼容；不支持 ARM 转译与投屏声音",
       "favoriteVersion": 2
-    },
-    {
-      "id": "system-images;android-34;google_apis_playstore;x86_64",
-      "name": "Android 14 (API 34) - Google Play 商店",
-      "apiLevel": "34",
-      "tagId": "google_apis_playstore",
-      "abi": "x86_64",
-      "url": "https://dl.google.com/android/repository/sys-img/google_apis_playstore/x86_64-34_r14.zip",
-      "favorite": false,
-      "note": ""
     },
     {
       "id": "system-images;android-33;google_apis_playstore;x86_64",
@@ -81,7 +84,7 @@
       "apiLevel": "33",
       "tagId": "google_apis_playstore",
       "abi": "x86_64",
-      "url": "https://dl.google.com/android/repository/sys-img/google_apis_playstore/x86_64-33_r09.zip",
+      "url": "",
       "favorite": false,
       "note": ""
     },
@@ -91,19 +94,18 @@
       "apiLevel": "34",
       "tagId": "default",
       "abi": "x86_64",
-      "url": "https://dl.google.com/android/repository/sys-img/android/x86_64-34_r08.zip",
+      "url": "",
       "favorite": false,
       "note": ""
     }
   ],
-  "cloneCount": 1,
   "screenLayout": {
     "size": "auto",
     "gap": 8,
     "smallHeight": 360,
     "mediumHeight": 540,
     "largeHeight": 720,
-    "windowTimeoutSeconds": 8,
+    "windowTimeoutSeconds": 30,
     "autoFill": false
   },
   "projection": {
@@ -144,23 +146,28 @@
   "hostSources": {
     "windows/amd64": {
       "platformTools": "https://dl.google.com/android/repository/platform-tools-latest-windows.zip",
-      "scrcpy": "https://github.com/Genymobile/scrcpy/releases/download/v5.0.1/scrcpy-win64-v5.0.1.zip"
+      "scrcpy": "https://github.com/Genymobile/scrcpy/releases/download/v5.0.1/scrcpy-win64-v5.0.1.zip",
+      "scrcpySha256": "b12a2c4ee8be317422451fc7dcf8ee20a71b5ea7ef9ad73ddd825a25316227a5"
     },
     "windows/arm64": {
       "platformTools": "",
-      "scrcpy": "https://github.com/Genymobile/scrcpy/releases/download/v5.0.1/scrcpy-winarm64-v5.0.1.zip"
+      "scrcpy": "https://github.com/Genymobile/scrcpy/releases/download/v5.0.1/scrcpy-winarm64-v5.0.1.zip",
+      "scrcpySha256": "16c3fc2068df64946f670e3504b4752073ebae47a416a45b46e79a5ab19c689b"
     },
     "darwin/amd64": {
       "platformTools": "https://dl.google.com/android/repository/platform-tools-latest-darwin.zip",
-      "scrcpy": "https://github.com/Genymobile/scrcpy/releases/download/v5.0.1/scrcpy-macos-x86_64-v5.0.1.tar.gz"
+      "scrcpy": "https://github.com/Genymobile/scrcpy/releases/download/v5.0.1/scrcpy-macos-x86_64-v5.0.1.tar.gz",
+      "scrcpySha256": "31a5467a9e907f162b093267cbbab1276b15c6e709c2ea8159566a8d165beb50"
     },
     "darwin/arm64": {
       "platformTools": "https://dl.google.com/android/repository/platform-tools-latest-darwin.zip",
-      "scrcpy": "https://github.com/Genymobile/scrcpy/releases/download/v5.0.1/scrcpy-macos-aarch64-v5.0.1.tar.gz"
+      "scrcpy": "https://github.com/Genymobile/scrcpy/releases/download/v5.0.1/scrcpy-macos-aarch64-v5.0.1.tar.gz",
+      "scrcpySha256": "33611e51977a8289e2e124b220f727895181ef2eb9060e0987a4dc2db9cf0d6b"
     },
     "linux/amd64": {
       "platformTools": "https://dl.google.com/android/repository/platform-tools-latest-linux.zip",
-      "scrcpy": "https://github.com/Genymobile/scrcpy/releases/download/v5.0.1/scrcpy-linux-x86_64-v5.0.1.tar.gz"
+      "scrcpy": "https://github.com/Genymobile/scrcpy/releases/download/v5.0.1/scrcpy-linux-x86_64-v5.0.1.tar.gz",
+      "scrcpySha256": "9f969d30cc574816077edecda65719c1c70b0aee1df1ba5fa00779ac07b8fd6e"
     },
     "linux/arm64": {
       "platformTools": "",
@@ -173,7 +180,7 @@
       "favorite": true,
       "favoriteVersion": 3,
       "apiLevel": "30",
-      "note": "Apple Silicon 日常多开首选",
+      "note": "Apple Silicon 日常多开首选；原生 ARM64，支持投屏声音",
       "abi": "arm64-v8a",
       "name": "Android 11 (API 30) - Google Play 商店 · ARM64",
       "tagId": "google_apis_playstore",
@@ -181,10 +188,11 @@
     },
     {
       "abi": "arm64-v8a",
-      "note": "",
+      "note": "Apple Silicon 主流新版本；原生 ARM64，支持投屏声音",
       "name": "Android 14 (API 34) - Google Play 商店 · ARM64",
       "url": "",
-      "favorite": false,
+      "favorite": true,
+      "favoriteVersion": 4,
       "id": "system-images;android-34;google_apis_playstore;arm64-v8a",
       "tagId": "google_apis_playstore",
       "apiLevel": "34"

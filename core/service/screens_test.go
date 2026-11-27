@@ -205,3 +205,126 @@ func TestOpenScreenAtPassesGeometryAndRejectsInvalidBounds(t *testing.T) {
 		t.Fatal("invalid bounds reached backend")
 	}
 }
+
+func TestNamedGroupScreenLayoutSaveRestoreAndDelete(t *testing.T) {
+	m, f, _ := newTestManager(t, 2, time.Second)
+	m.settingsPath = filepath.Join(t.TempDir(), "settings.json")
+	ctx := context.Background()
+
+	instances, err := m.Create(ctx, CreateSpec{
+		NamePrefix:  "grp",
+		Count:       2,
+		SystemImage: "system-images;android-30;google_apis_playstore;x86_64",
+		MemoryMB:    2048,
+		Cores:       2,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	gSocial, err := m.CreateGroup(ctx, "社媒")
+	if err != nil {
+		t.Fatal(err)
+	}
+	gShop, err := m.CreateGroup(ctx, "电商")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := m.AssignGroup(ctx, []string{instances[0].ID}, gSocial.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.AssignGroup(ctx, []string{instances[1].ID}, gShop.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	f.displays = []screenlayout.Display{{ID: "main", Primary: true, Scale: 1, WorkArea: screenlayout.Rect{Width: 1920, Height: 1080}}}
+	f.screens = []emu.ProjectionWindow{
+		{InstanceID: instances[0].ID, Window: screenlayout.Window{Handle: 1, Bounds: screenlayout.Rect{X: 20, Y: 20, Width: 200, Height: 340}, ClientWidth: 180, ClientHeight: 300, Scale: 1}},
+		{InstanceID: instances[1].ID, Window: screenlayout.Window{Handle: 2, Bounds: screenlayout.Rect{X: 260, Y: 20, Width: 200, Height: 340}, ClientWidth: 180, ClientHeight: 300, Scale: 1}},
+	}
+
+	// Save default layout first (covers both instances).
+	if n, err := m.SaveScreenLayout(ctx, ScreenLayoutRequest{}); err != nil || n != 2 {
+		t.Fatalf("default save failed: %d %v", n, err)
+	}
+	// Save named preset scoped to gSocial only.
+	if n, err := m.SaveScreenLayout(ctx, ScreenLayoutRequest{GroupID: gSocial.ID, PresetName: "社媒竖排"}); err != nil || n != 1 {
+		t.Fatalf("named group save failed: %d %v", n, err)
+	}
+
+	snap, err := m.InspectScreenLayout(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snap.SavedCount != 2 || len(snap.Presets) != 1 || snap.Presets[0].Name != "社媒竖排" || snap.Presets[0].GroupID != gSocial.ID || snap.Presets[0].WindowCount != 1 {
+		t.Fatalf("unexpected layout snapshot: %+v", snap)
+	}
+
+	f.arrangedCount = 1
+	if n, err := m.RestoreScreenLayout(ctx, ScreenLayoutRequest{GroupID: gSocial.ID, PresetName: "社媒竖排"}); err != nil || n != 1 {
+		t.Fatalf("named restore failed: %d %v", n, err)
+	}
+	if len(f.restored) != 1 || f.restored[0].InstanceID != instances[0].ID {
+		t.Fatalf("expected restored preset to target only gSocial instance, got %+v", f.restored)
+	}
+
+	if err := m.DeleteScreenLayoutPreset(ctx, "社媒竖排"); err != nil {
+		t.Fatalf("DeleteScreenLayoutPreset failed: %v", err)
+	}
+	snap2, err := m.InspectScreenLayout(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snap2.SavedCount != 2 || len(snap2.Presets) != 0 {
+		t.Fatalf("expected default layout preserved and preset deleted: %+v", snap2)
+	}
+}
+
+func TestScreenLayoutColumnsAndRememberPosition(t *testing.T) {
+	m, f, _ := newTestManager(t, 2, time.Second)
+	m.settingsPath = filepath.Join(t.TempDir(), "settings.json")
+	ctx := context.Background()
+
+	instances, err := m.Create(ctx, CreateSpec{
+		NamePrefix:  "rem",
+		Count:       2,
+		SystemImage: "system-images;android-30;google_apis_playstore;x86_64",
+		MemoryMB:    2048,
+		Cores:       2,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := instances[0].ID
+	_, _ = m.registry.Update(id, func(i *Instance) error { i.State = Running; i.Port = 5554; return nil })
+
+	if err := m.SetScreenRememberPosition(ctx, true); err != nil {
+		t.Fatal(err)
+	}
+	f.displays = []screenlayout.Display{{ID: "main", Primary: true, Scale: 1, WorkArea: screenlayout.Rect{Width: 1920, Height: 1040}}}
+	f.screens = []emu.ProjectionWindow{{
+		InstanceID: id,
+		Window:     screenlayout.Window{Handle: 9, PID: 10, Bounds: screenlayout.Rect{X: 120, Y: 80, Width: 300, Height: 540}, ClientWidth: 280, ClientHeight: 500, Scale: 1},
+	}}
+	f.arrangedCount = 1
+
+	// Arrange with explicit Columns=3 -> saved in preferences + captured in LastPositions.
+	if n, err := m.ArrangeScreenLayout(ctx, ScreenLayoutRequest{DisplayID: "main", Size: "auto", Columns: 3}); err != nil || n != 1 {
+		t.Fatalf("ArrangeScreenLayout(Columns=3) failed: n=%d err=%v", n, err)
+	}
+	if m.GetSettings().ScreenLayout.Columns != 3 || f.lastScreenOptions.Columns != 3 {
+		t.Fatalf("expected Columns=3 saved & forwarded: settings=%+v opts=%+v", m.GetSettings().ScreenLayout, f.lastScreenOptions)
+	}
+
+	// Simulate closed window then reopening screen later: RestoreProjection must be called for id with its last saved position.
+	f.screens = nil
+	f.restored = nil
+	f.screenStart = func(id string) {
+		f.screens = []emu.ProjectionWindow{{InstanceID: id, Window: screenlayout.Window{Handle: 9, PID: 10}}}
+	}
+	if err := m.OpenScreen(ctx, id); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.restored) != 1 || f.restored[0].InstanceID != id || f.restored[0].Bounds.X != 120 {
+		t.Fatalf("expected OpenScreen to restore remembered position, got %+v", f.restored)
+	}
+}
